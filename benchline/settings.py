@@ -218,3 +218,18 @@ PAYSTACK_PUBLIC_KEY = config('PAYSTACK_PUBLIC_KEY', default='')
 # ---------------------------------------------------------------------------
 RESEND_API_KEY = config('RESEND_API_KEY', default='')
 EMAIL_FROM = config('EMAIL_FROM', default='GSS <onboarding@resend.dev>')
+
+# ---------------------------------------------------------------------------
+# Cloudinary — hosting for the optional product-image feature
+# (inventory.cloudinary_utils / InventoryItem.image_url). Same pattern as
+# Paystack/Resend above: real values only from the environment, blank
+# defaults so nothing is ever hardcoded/committed. Set these in your local
+# .env and in Railway's environment variables; get them from your
+# Cloudinary dashboard (Settings -> API Keys). With any of these blank,
+# uploading a product image will fail (a clear error, not a crash) --
+# every other product feature, including creating/editing products with
+# no image, keeps working exactly as before regardless.
+# ---------------------------------------------------------------------------
+CLOUDINARY_CLOUD_NAME = config('CLOUDINARY_CLOUD_NAME', default='')
+CLOUDINARY_API_KEY = config('CLOUDINARY_API_KEY', default='')
+CLOUDINARY_API_SECRET = config('CLOUDINARY_API_SECRET', default='')

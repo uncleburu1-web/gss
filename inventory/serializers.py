@@ -99,9 +99,17 @@ class InventoryItemSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'name', 'short_code', 'barcode', 'category', 'brand', 'unit', 'spec',
             'quantity', 'min_stock', 'prescription_required', 'cost_price', 'sell_price', 'is_low_stock',
-            'stock_value', 'batch_count', 'has_variants', 'created_at', 'updated_at',
+            'stock_value', 'batch_count', 'has_variants', 'image_url', 'created_at', 'updated_at',
         ]
-        read_only_fields = ['id', 'created_at', 'updated_at']
+        # image_url is read-only here on purpose -- it's only ever set via
+        # InventoryItemViewSet's dedicated `image` upload/delete action
+        # (see views.py), never accepted as a plain string on create/
+        # update, so a client can never point a product at an arbitrary
+        # URL instead of an image this backend actually validated and
+        # uploaded to Cloudinary itself. A create/update request that
+        # doesn't mention it at all — the normal case — is completely
+        # unaffected and behaves exactly as before this field existed.
+        read_only_fields = ['id', 'created_at', 'updated_at', 'image_url']
 
     def to_internal_value(self, data):
         # Same reasoning as StockBatchSerializer: an untouched barcode field

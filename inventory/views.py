@@ -1,10 +1,13 @@
 from rest_framework import viewsets, filters
 from rest_framework.decorators import action
+from rest_framework.parsers import FormParser, JSONParser, MultiPartParser
 from rest_framework.response import Response
 from django_filters.rest_framework import DjangoFilterBackend
 
 from core.permissions import IsOwnerOrReadOnly
 from core.mixins import ShopScopedMixin
+from realtime.events import broadcast
+from .cloudinary_utils import InvalidProductImage, delete_product_image, upload_product_image, validate_product_image
 from .models import InventoryItem, ItemVariant, StockBatch
 from .serializers import (
     InventoryItemSerializer, InventoryItemDetailSerializer, ItemVariantSerializer, StockBatchSerializer,
@@ -55,6 +58,50 @@ class InventoryItemViewSet(ShopScopedMixin, viewsets.ModelViewSet):
         serializer.save(shop=self.get_current_shop())
         item.refresh_from_db()
         return Response(InventoryItemDetailSerializer(item).data, status=201)
+
+    @action(
+        detail=True, methods=['post', 'delete'], url_path='image',
+        parser_classes=[MultiPartParser, FormParser, JSONParser],
+    )
+    def image(self, request, pk=None):
+        """POST (multipart/form-data, file field named `image`) uploads a
+        photo for this product -- or replaces the existing one in place --
+        via Cloudinary. DELETE removes it. This is deliberately its own
+        endpoint rather than a field on the normal create/update body:
+        Cloudinary needs actual file bytes, which the plain JSON product
+        contract was never designed to carry, and this keeps that contract
+        (`{"name": ..., "price": ..., "stock": ...}` with no image, and
+        every existing client that sends exactly that) completely
+        unchanged. IsOwnerOrReadOnly (this viewset's permission_classes)
+        already restricts both methods to the shop owner, same as any
+        other product write.
+        """
+        item = self.get_object()
+
+        if request.method == 'DELETE':
+            delete_product_image(item.cloudinary_public_id)
+            item.image_url = None
+            item.cloudinary_public_id = ''
+            item.save(update_fields=['image_url', 'cloudinary_public_id', 'updated_at'])
+            broadcast(item.shop, 'inventoryitem.updated', {'id': str(item.pk)})
+            return Response(InventoryItemSerializer(item).data)
+
+        file_obj = request.data.get('image')
+        try:
+            validate_product_image(file_obj)
+        except InvalidProductImage as exc:
+            return Response({'detail': str(exc)}, status=400)
+
+        try:
+            url, public_id = upload_product_image(file_obj, previous_public_id=item.cloudinary_public_id or None)
+        except Exception:
+            return Response({'detail': 'Could not upload this image right now — please try again.'}, status=502)
+
+        item.image_url = url
+        item.cloudinary_public_id = public_id
+        item.save(update_fields=['image_url', 'cloudinary_public_id', 'updated_at'])
+        broadcast(item.shop, 'inventoryitem.updated', {'id': str(item.pk)})
+        return Response(InventoryItemSerializer(item).data)
 
     @action(detail=True, methods=['get', 'post'], url_path='variants')
     def variants(self, request, pk=None):

@@ -7,6 +7,8 @@ psycopg2-binary==2.9.12
 dj-database-url==2.3.0
 python-decouple==3.8
 requests==2.32.3
+cloudinary==1.41.0
+Pillow==11.0.0
 channels==4.2.0
 # channels_redis==4.3.0  -- uncomment + install once REDIS_URL is set on
 # Railway (needed only when running more than one backend process; see

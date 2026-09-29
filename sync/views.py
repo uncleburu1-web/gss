@@ -56,6 +56,18 @@ def _apply_product(shop, entity_id, operation, payload):
         'sell_price': payload.get('sell_price') or 0,
         'min_stock': payload.get('min_stock') if payload.get('min_stock') is not None else 2,
     }
+    # image_url is deliberately only touched when the payload actually
+    # names it. It's real product data (see InventoryItem.image_url) and
+    # `image_url: null` IS a valid, expected value for a product with no
+    # photo -- but the image itself is only ever set through the
+    # dedicated Cloudinary upload endpoint (InventoryItemViewSet.image),
+    # never through this JSON sync path. An older desktop build's local
+    # row (before it has the image_url column at all) simply omits the
+    # key here, and that must leave an already-uploaded image alone
+    # rather than reading as "clear it" -- hence the explicit `in`
+    # check instead of always defaulting to payload.get('image_url').
+    if 'image_url' in payload:
+        defaults['image_url'] = payload.get('image_url') or None
     InventoryItem.objects.update_or_create(id=entity_id, shop=shop, defaults=defaults)
 
 
@@ -310,6 +322,14 @@ def _serialize_product(o):
         'id': str(o.id), 'name': o.name, 'short_code': o.short_code, 'barcode': o.barcode,
         'category': o.category, 'unit': o.unit,
         'sell_price': str(o.sell_price), 'min_stock': o.min_stock,
+        # Always included (even as null) -- this is a full snapshot pull,
+        # not a partial patch, so a product whose image was removed (or
+        # never had one) correctly clears/stays clear on every pulling
+        # device. cloudinary_public_id is deliberately NOT included here:
+        # it's internal bookkeeping the desktop/mobile never need to see
+        # or manage -- image changes only ever happen through the
+        # dedicated REST upload endpoint, which already has it server-side.
+        'image_url': o.image_url,
     }
 
 

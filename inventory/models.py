@@ -86,6 +86,31 @@ class InventoryItem(SyncModel):
         max_digits=12, decimal_places=2, default=Decimal('0.00'),
         help_text='Current default unit selling price (kept in sync with the latest batch, editable)',
     )
+    # Optional product photo. Entirely optional at every layer -- a
+    # product with no image is a completely normal, fully-supported state
+    # (image_url/cloudinary_public_id just stay null/blank), never a
+    # required or partially-filled-in row. Only ever set/cleared through
+    # InventoryItemViewSet's `image` action (see views.py) -- deliberately
+    # NOT writable on the main serializer, so a client can't point a
+    # product at an arbitrary URL instead of an image this backend has
+    # actually validated and uploaded itself.
+    #
+    # No image binary is ever stored in Postgres -- Cloudinary hosts the
+    # file, this just keeps the pointer to it (same reasoning as
+    # core.models.Shop.logo_url, which predates this and does the same
+    # thing for a different reason: no persistent media storage is
+    # configured on this backend at all, Railway's filesystem is
+    # ephemeral).
+    image_url = models.URLField(
+        max_length=500, null=True, blank=True,
+        help_text='Cloudinary-hosted product photo URL. Null when no image has been uploaded -- a '
+                   'perfectly normal, fully-supported state, not an error or an incomplete product.',
+    )
+    cloudinary_public_id = models.CharField(
+        max_length=255, blank=True,
+        help_text='Cloudinary asset id backing image_url -- needed to replace/delete the asset later. '
+                   'Internal bookkeeping only; never exposed on the public serializer.',
+    )
     # created_at / updated_at / is_deleted / shop / id (UUID) come from SyncModel.
 
     class Meta:
