@@ -1,14 +1,4 @@
 from rest_framework import serializers
-<<<<<<< HEAD
-from .models import Liability
-
-
-class LiabilitySerializer(serializers.ModelSerializer):
-    class Meta:
-        model = Liability
-        fields = ['id', 'name', 'category', 'amount', 'due_date', 'status', 'notes', 'created_at']
-        read_only_fields = ['id', 'created_at']
-=======
 from .models import Liability, LiabilityPayment
 
 
@@ -81,4 +71,3 @@ class LiabilitySerializer(serializers.ModelSerializer):
         if amount <= 0:
             raise serializers.ValidationError('Amount must be greater than zero.')
         return amount
->>>>>>> 6f155c9 (Add expense support)
