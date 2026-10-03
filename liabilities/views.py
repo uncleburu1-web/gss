@@ -1,22 +1,7 @@
 from rest_framework import viewsets, filters
 from django_filters.rest_framework import DjangoFilterBackend
-<<<<<<< HEAD
-from core.permissions import IsOwner
-from core.mixins import ShopScopedMixin
-from .models import Liability
-from .serializers import LiabilitySerializer
 
-
-class LiabilityViewSet(ShopScopedMixin, viewsets.ModelViewSet):
-    queryset = Liability.objects.filter(is_deleted=False)
-    permission_classes = [IsOwner]
-    serializer_class = LiabilitySerializer
-    filter_backends = [DjangoFilterBackend, filters.SearchFilter]
-    filterset_fields = ['category', 'status']
-    search_fields = ['name']
-=======
-
-from core.permissions import HasCapability
+from core.permissions import IsOwner, HasCapability
 from core.mixins import ShopScopedMixin
 from realtime.events import broadcast
 from .models import Liability, LiabilityPayment
@@ -74,4 +59,3 @@ class LiabilityPaymentViewSet(ShopScopedMixin, viewsets.ModelViewSet):
         liability.refresh_status()
         broadcast(instance.shop, 'liabilitypayment.deleted', {'id': str(instance.pk), 'liability_id': str(liability.pk)})
         broadcast(instance.shop, 'liability.updated', {'id': str(liability.pk)})
->>>>>>> 6f155c9 (Add expense support)
