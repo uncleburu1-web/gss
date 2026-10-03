@@ -1,4 +1,4 @@
-```python
+
 """
 The Control Center's data model: a small, named set of CAPABILITIES an
 
