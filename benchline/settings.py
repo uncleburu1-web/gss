@@ -37,6 +37,7 @@ INSTALLED_APPS = [
     'repairs',
     'sales',
     'liabilities',
+    'expenses',
     'reports',
     'devices',
     'subscriptions',
