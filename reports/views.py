@@ -3,11 +3,7 @@ from datetime import timedelta
 
 from django.utils import timezone
 from rest_framework.views import APIView
-<<<<<<< HEAD
-from core.permissions import IsOwner
-=======
 from core.permissions import HasCapability
->>>>>>> 6f155c9 (Add expense support)
 from core.utils import get_shops_for_user
 from rest_framework.response import Response
 
@@ -40,11 +36,7 @@ def _shops_for(request):
 
 
 class SalesSummaryView(APIView):
-<<<<<<< HEAD
-    permission_classes = [IsOwner]
-=======
     permission_classes = [HasCapability('view_financial_reports')]
->>>>>>> 6f155c9 (Add expense support)
 
     def get(self, request):
         shops = _shops_for(request)
@@ -103,11 +95,7 @@ class SalesSummaryView(APIView):
 
 
 class SalesByItemView(APIView):
-<<<<<<< HEAD
-    permission_classes = [IsOwner]
-=======
     permission_classes = [HasCapability('view_financial_reports')]
->>>>>>> 6f155c9 (Add expense support)
 
     def get(self, request):
         shops = _shops_for(request)
@@ -143,11 +131,7 @@ class SalesByItemView(APIView):
 
 
 class BestSellingView(APIView):
-<<<<<<< HEAD
-    permission_classes = [IsOwner]
-=======
     permission_classes = [HasCapability('view_financial_reports')]
->>>>>>> 6f155c9 (Add expense support)
 
     def get(self, request):
         shops = _shops_for(request)
@@ -168,11 +152,7 @@ class BestSellingView(APIView):
 
 
 class SalesByCategoryView(APIView):
-<<<<<<< HEAD
-    permission_classes = [IsOwner]
-=======
     permission_classes = [HasCapability('view_financial_reports')]
->>>>>>> 6f155c9 (Add expense support)
 
     def get(self, request):
         shops = _shops_for(request)
@@ -193,11 +173,7 @@ class SalesByCategoryView(APIView):
 
 
 class SalesByStaffView(APIView):
-<<<<<<< HEAD
-    permission_classes = [IsOwner]
-=======
     permission_classes = [HasCapability('view_financial_reports')]
->>>>>>> 6f155c9 (Add expense support)
 
     def get(self, request):
         shops = _shops_for(request)
@@ -218,11 +194,7 @@ class SalesByStaffView(APIView):
 
 
 class PaymentMethodView(APIView):
-<<<<<<< HEAD
-    permission_classes = [IsOwner]
-=======
     permission_classes = [HasCapability('view_financial_reports')]
->>>>>>> 6f155c9 (Add expense support)
 
     def get(self, request):
         shops = _shops_for(request)
@@ -241,11 +213,7 @@ class PaymentMethodView(APIView):
 
 
 class SalesByCustomerView(APIView):
-<<<<<<< HEAD
-    permission_classes = [IsOwner]
-=======
     permission_classes = [HasCapability('view_financial_reports')]
->>>>>>> 6f155c9 (Add expense support)
 
     def get(self, request):
         shops = _shops_for(request)
@@ -266,11 +234,7 @@ class SalesByCustomerView(APIView):
 
 
 class TaxReportView(APIView):
-<<<<<<< HEAD
-    permission_classes = [IsOwner]
-=======
     permission_classes = [HasCapability('view_financial_reports')]
->>>>>>> 6f155c9 (Add expense support)
 
     def get(self, request):
         shops = _shops_for(request)
@@ -295,11 +259,7 @@ class TaxReportView(APIView):
 
 
 class ExpiringInventoryView(APIView):
-<<<<<<< HEAD
-    permission_classes = [IsOwner]
-=======
     permission_classes = [HasCapability('view_financial_reports')]
->>>>>>> 6f155c9 (Add expense support)
 
     def get(self, request):
         shops = _shops_for(request)
@@ -326,11 +286,7 @@ class ExpiringInventoryView(APIView):
 
 
 class InventoryValuationView(APIView):
-<<<<<<< HEAD
-    permission_classes = [IsOwner]
-=======
     permission_classes = [HasCapability('view_financial_reports')]
->>>>>>> 6f155c9 (Add expense support)
 
     def get(self, request):
         shops = _shops_for(request)
@@ -375,11 +331,7 @@ class InventoryValuationView(APIView):
 
 
 class NetWorthView(APIView):
-<<<<<<< HEAD
-    permission_classes = [IsOwner]
-=======
     permission_classes = [HasCapability('view_financial_reports')]
->>>>>>> 6f155c9 (Add expense support)
 
     def get(self, request):
         shops = _shops_for(request)
@@ -387,17 +339,11 @@ class NetWorthView(APIView):
         receivables = sum(s.balance_due for s in Sale.objects.filter(shop__in=shops, status='outstanding', is_deleted=False))
         assets = float(inventory_value) + float(receivables)
 
-<<<<<<< HEAD
-        liabilities_total = sum(
-            float(l.amount) for l in Liability.objects.filter(shop__in=shops, status='pending', is_deleted=False)
-        )
-=======
         from django.db.models import Sum, Q
         outstanding_liabilities = Liability.objects.filter(shop__in=shops, is_deleted=False).exclude(status='cleared').annotate(
             paid=Sum('payments__amount', filter=Q(payments__is_deleted=False))
         )
         liabilities_total = sum(float(l.amount - (l.paid or 0)) for l in outstanding_liabilities)
->>>>>>> 6f155c9 (Add expense support)
 
         return Response({
             'inventory_value': float(inventory_value),
