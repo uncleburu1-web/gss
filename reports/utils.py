@@ -32,8 +32,6 @@ def parse_period(request):
     start = datetime(today.year, today.month, today.day, tzinfo=tz)
     end = start + timedelta(days=1)
     return start, end, today.isoformat(), 'day'
-<<<<<<< HEAD
-=======
 
 
 def parse_range_period(request):
@@ -107,4 +105,3 @@ def parse_range_period(request):
         'start': start, 'end': end, 'label': label,
         'previous_start': start - length, 'previous_end': start,
     }
->>>>>>> 6f155c9 (Add expense support)
