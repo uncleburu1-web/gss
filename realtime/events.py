@@ -40,9 +40,13 @@ any of the existing call sites to change — if there's no active
 transaction, Django just runs it immediately, so this is always safe to
 call exactly as before.
 """
+import logging
+
 from asgiref.sync import async_to_sync
 from channels.layers import get_channel_layer
 from django.db import transaction
+
+logger = logging.getLogger(__name__)
 
 
 def shop_group_name(shop_id):
@@ -63,30 +67,49 @@ def broadcast(shop, event_type, payload):
         from core.models import Shop
         from .models import RealtimeEvent
 
-        with transaction.atomic():
-            locked_shop = Shop.objects.select_for_update().get(pk=shop.pk)
-            locked_shop.last_event_sequence += 1
-            locked_shop.save(update_fields=['last_event_sequence'])
-            event = RealtimeEvent.objects.create(
-                shop=locked_shop,
-                sequence=locked_shop.last_event_sequence,
-                event_type=event_type,
-                payload=payload,
-            )
-
-        layer = get_channel_layer()
-        if layer is None:
+        # NOTHING in this function may raise. It runs after the caller's
+        # data has already committed, so an exception here cannot undo
+        # that data -- it can only turn a successful write into an HTTP 500
+        # and make the client retry (or, for the desktop's sync queue,
+        # back off) work that is already safely done. This module's own
+        # docstring promises "if the channel layer is down, NOTHING is
+        # lost"; these two guards are what make that true. The event row
+        # is persisted first and separately, so a failed *send* still
+        # leaves a durable record clients can catch up from.
+        try:
+            with transaction.atomic():
+                locked_shop = Shop.objects.select_for_update().get(pk=shop.pk)
+                locked_shop.last_event_sequence += 1
+                locked_shop.save(update_fields=['last_event_sequence'])
+                event = RealtimeEvent.objects.create(
+                    shop=locked_shop,
+                    sequence=locked_shop.last_event_sequence,
+                    event_type=event_type,
+                    payload=payload,
+                )
+        except Exception:
+            logger.exception('realtime: could not persist %s event for shop %s', event_type, shop.pk)
             return
-        async_to_sync(layer.group_send)(
-            shop_group_name(shop.id),
-            {
-                'type': 'shop.event',
-                'event': event_type,
-                'payload': payload,
-                'event_id': str(event.id),
-                'sequence': event.sequence,
-                'shop_id': str(shop.id),
-            },
-        )
+
+        try:
+            layer = get_channel_layer()
+            if layer is None:
+                return
+            async_to_sync(layer.group_send)(
+                shop_group_name(shop.id),
+                {
+                    'type': 'shop.event',
+                    'event': event_type,
+                    'payload': payload,
+                    'event_id': str(event.id),
+                    'sequence': event.sequence,
+                    'shop_id': str(shop.id),
+                },
+            )
+        except Exception:
+            logger.exception(
+                'realtime: channel layer send failed for %s (shop %s); event %s is persisted, clients will catch up',
+                event_type, shop.pk, event.id,
+            )
 
     transaction.on_commit(_send)

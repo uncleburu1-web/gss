@@ -68,9 +68,9 @@ class InventoryItem(SyncModel):
     name = models.CharField(max_length=200)
     short_code = models.CharField(max_length=40, blank=True, help_text='Short label e.g. "Para500"')
     barcode = models.CharField(
-        max_length=64, null=True, blank=True, unique=True, db_index=True,
-        help_text='Scanned/printed barcode (UPC/EAN or a shop-assigned code). Null (not empty string) when '
-                   'unset so multiple barcode-less products never collide on the unique constraint.',
+        max_length=64, null=True, blank=True, db_index=True,
+        help_text='Scanned/printed barcode (UPC/EAN or a shop-assigned code), unique among a shop\'s active '
+                   'products (see Meta.constraints). Null (not empty string) when unset.',
     )
     category = models.CharField(max_length=20, choices=CATEGORY_CHOICES, default='other')
     brand = models.CharField(max_length=100, blank=True)
@@ -115,6 +115,16 @@ class InventoryItem(SyncModel):
 
     class Meta:
         ordering = ['name']
+        constraints = [
+            # Barcodes identify a PRODUCT, so two different shops legitimately stock the same
+            # EAN/UPC. Unique per shop, ignoring deleted rows (a deleted product must not keep
+            # reserving its code) and unset/empty codes.
+            models.UniqueConstraint(
+                fields=['shop', 'barcode'],
+                condition=models.Q(barcode__isnull=False, is_deleted=False) & ~models.Q(barcode=''),
+                name='uniq_item_barcode_per_shop_active',
+            ),
+        ]
 
     def __str__(self):
         return f'{self.name} ({self.quantity} in stock)'

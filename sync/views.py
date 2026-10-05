@@ -10,7 +10,9 @@ correctly treats as "still offline," so it just quietly kept the queue
 `pending` forever instead of failing loudly. Nothing below changes that
 contract — same request/response shape sync.js already sends and expects.
 """
-from django.db import transaction
+from datetime import timedelta, timezone as dt_timezone
+
+from django.db import IntegrityError, transaction
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -142,6 +144,13 @@ def _apply_sale(shop, entity_id, operation, payload):
         if customer is None:
             raise _Skip()  # this sale's customer hasn't synced yet
         defaults['customer'] = customer
+    # Record WHEN the sale happened, not when it finally reached us -- but only
+    # when the sale is being created. A later update (e.g. an installment
+    # payment) must never be able to rewrite a sale's date.
+    if not Sale.objects.filter(id=entity_id, shop=shop).exists():
+        sale_date = _sale_date_from_payload(payload)
+        if sale_date is not None:
+            defaults['date'] = sale_date
     invoice_number = payload.get('invoice_number')
     if invoice_number:
         # The desktop sends its own offline-assigned number (see the
@@ -231,6 +240,43 @@ _EVENT_VERB = {'create': 'created', 'update': 'updated', 'delete': 'deleted'}
 _OWNER_ONLY_ENTITIES = {'product', 'stock_batch'}
 
 
+class _Duplicate(Exception):
+    """Our idempotency CLAIM (the SyncOperation insert) lost a race: another
+    request inserted the same operation id between our pre-check and our
+    insert. Not an error -- it means "somebody else is applying (or has
+    applied) this exact operation", which is precisely what idempotency
+    promises to tolerate."""
+
+
+def _already_applied(shop, op_id):
+    # Scoped to the shop on purpose: operation ids are client-generated
+    # UUIDs, and one shop must never learn (or be told "already applied")
+    # about another shop's operation just because the ids collided.
+    return SyncOperation.objects.filter(id=op_id, shop=shop).exists()
+
+
+# How far ahead of the server's clock a till's sale timestamp may be before
+# we stop trusting it. A till with a wrong clock must not be able to push
+# sales into the future (it would put them in tomorrow's reports).
+MAX_CLIENT_CLOCK_AHEAD = timedelta(minutes=5)
+
+
+def _sale_date_from_payload(payload):
+    """The moment the sale was actually rung up, as recorded by the till.
+    None -> caller leaves the model default (arrival time)."""
+    raw = payload.get('date')
+    if not isinstance(raw, str) or not raw:
+        return None
+    parsed = parse_datetime(raw)
+    if parsed is None:
+        return None
+    if timezone.is_naive(parsed):
+        parsed = timezone.make_aware(parsed, dt_timezone.utc)
+    if parsed > timezone.now() + MAX_CLIENT_CLOCK_AHEAD:
+        return None
+    return parsed
+
+
 class SyncPushView(APIView):
     """POST /api/sync/push/
 
@@ -261,7 +307,7 @@ class SyncPushView(APIView):
             if not op_id or not entity_id:
                 continue  # malformed — nothing to key on, skip rather than crash the whole batch
 
-            if SyncOperation.objects.filter(id=op_id).exists():
+            if _already_applied(shop, op_id):
                 results.append({'id': op_id, 'status': 'already_applied'})
                 continue
 
@@ -296,11 +342,31 @@ class SyncPushView(APIView):
 
             try:
                 with transaction.atomic():
+                    # CLAIM FIRST. The SyncOperation primary key is the lock:
+                    # if two requests carry the same operation (a retry that
+                    # overlaps the original, a double-sent batch), the second
+                    # INSERT waits for the first to finish and then fails here
+                    # -- instead of both running the handler and one of them
+                    # being reported as a bogus "rejected" at the very end.
+                    # Anything that goes wrong afterwards (including _Skip)
+                    # rolls the claim back together with the handler's writes.
+                    try:
+                        SyncOperation.objects.create(
+                            id=op_id, shop=shop, entity_type=entity_type,
+                            entity_id=entity_id, operation=operation,
+                        )
+                    except IntegrityError:
+                        raise _Duplicate()
                     handler(shop, entity_id, operation, payload)
-                    SyncOperation.objects.create(
-                        id=op_id, shop=shop, entity_type=entity_type,
-                        entity_id=entity_id, operation=operation,
-                    )
+            except _Duplicate:
+                if _already_applied(shop, op_id):
+                    results.append({'id': op_id, 'status': 'already_applied'})
+                else:
+                    results.append({
+                        'id': op_id, 'status': 'rejected',
+                        'error': 'This operation id is already in use by another shop.',
+                    })
+                continue
             except _Skip:
                 continue  # leave it out of `results` — sync.js retries it next tick
             except Exception as exc:

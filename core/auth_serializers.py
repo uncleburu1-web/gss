@@ -72,7 +72,15 @@ class DeviceAwareTokenObtainPairSerializer(TokenObtainPairSerializer):
                         'detail': 'This account is not linked to any branch, so this device cannot be set up with it.',
                         'code': 'no_branch',
                     })
-                Device.objects.create(id=device_id, shop=shop, device_type='desktop')
+                # update_or_create, not create: after an owner removes a device
+                # its row is only soft-deleted, so the same machine's next login
+                # finds NO live row but DOES collide with the dead row's primary
+                # key. Reviving it is exactly the documented "pairs fresh to
+                # whoever logs in" behaviour (see DeviceDetailView).
+                Device.objects.update_or_create(
+                    id=device_id,
+                    defaults={'shop': shop, 'device_type': 'desktop', 'is_deleted': False},
+                )
             elif not user_may_use_branch_device(user, device.shop):
                 raise serializers.ValidationError({
                     'detail': f'This device is set up for {device.shop.name}. Log in with an account from '

@@ -1,4 +1,6 @@
 from rest_framework import serializers
+
+from core.utils import get_shop_for_user
 from .models import InventoryItem, ItemVariant, StockBatch
 
 
@@ -110,6 +112,28 @@ class InventoryItemSerializer(serializers.ModelSerializer):
         # doesn't mention it at all — the normal case — is completely
         # unaffected and behaves exactly as before this field existed.
         read_only_fields = ['id', 'created_at', 'updated_at', 'image_url']
+
+    def validate_barcode(self, value):
+        # unique=True used to make DRF add this check automatically (and
+        # globally). Uniqueness is now per shop (a DB constraint), so the
+        # friendly 400 has to be explicit or a duplicate would surface as a 500.
+        if not value:
+            return value
+        if self.instance is not None:
+            shop = self.instance.shop
+        else:
+            request = self.context.get('request')
+            shop = None
+            if request is not None:
+                shop = get_shop_for_user(request.user, branch_id=request.headers.get('X-Branch-ID') or None)
+        if shop is None:
+            return value
+        clash = InventoryItem.objects.filter(shop=shop, barcode=value, is_deleted=False)
+        if self.instance is not None:
+            clash = clash.exclude(pk=self.instance.pk)
+        if clash.exists():
+            raise serializers.ValidationError('Another product in this shop already uses that barcode.')
+        return value
 
     def to_internal_value(self, data):
         # Same reasoning as StockBatchSerializer: an untouched barcode field

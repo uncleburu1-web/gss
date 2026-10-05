@@ -1,5 +1,6 @@
 from decimal import Decimal
 from django.db import models
+from django.utils import timezone
 from core.models import SyncModel
 from inventory.models import InventoryItem
 
@@ -41,7 +42,11 @@ class Sale(SyncModel):
         'staff.Worker', on_delete=models.SET_NULL, null=True, blank=True, related_name='sales'
     )
     payment_method = models.CharField(max_length=20, choices=PAYMENT_CHOICES, default='cash')
-    date = models.DateTimeField(auto_now_add=True)
+    # Was auto_now_add=True, which silently stamped every OFFLINE sale with the moment it
+    # finally synced instead of the moment it was rung up. default= (not auto_now_add) lets the
+    # sync handler record the till's own timestamp; editable=False keeps it read-only for every
+    # serializer/form, so only trusted server code (sync.views._apply_sale) can set it.
+    date = models.DateTimeField(default=timezone.now, editable=False)
 
     class Meta:
         ordering = ['-date']
