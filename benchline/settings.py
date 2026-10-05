@@ -181,6 +181,14 @@ SIMPLE_JWT = {
 from corsheaders.defaults import default_headers
 
 CORS_ALLOWED_ORIGINS = config('CORS_ALLOWED_ORIGINS', default='http://localhost:5173,http://localhost:3000', cast=Csv())
+# The installed mobile apps (Capacitor) load their screens from a local
+# origin of their own, so their API calls are cross-origin too: Android's
+# WebView identifies as https://localhost, and the iPhone/iPad app's as
+# capacitor://localhost. Always allow both, so the apps work without having
+# to remember to add them to the CORS_ALLOWED_ORIGINS environment variable.
+for _mobile_origin in ('https://localhost', 'capacitor://localhost'):
+    if _mobile_origin not in CORS_ALLOWED_ORIGINS:
+        CORS_ALLOWED_ORIGINS.append(_mobile_origin)
 CORS_ALLOW_CREDENTIALS = True
 # django-cors-headers only allows its own fixed default header set through
 # preflight otherwise -- api/client.js's request interceptor attaches a
