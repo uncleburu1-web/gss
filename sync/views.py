@@ -47,10 +47,18 @@ def _apply_product(shop, entity_id, operation, payload):
     if operation == 'delete':
         InventoryItem.objects.filter(id=entity_id, shop=shop).update(is_deleted=True)
         return
+    barcode = payload.get('barcode') or None
+    # Barcodes are unique per branch (not globally) -- reject a clash with a
+    # clear message here instead of letting the DB constraint surface as a
+    # raw IntegrityError string in the sync results.
+    if barcode and InventoryItem.objects.filter(
+        shop=shop, barcode=barcode, is_deleted=False,
+    ).exclude(id=entity_id).exists():
+        raise ValueError('Another product in this branch already uses that barcode.')
     defaults = {
         'name': payload.get('name', ''),
         'short_code': payload.get('short_code') or '',
-        'barcode': payload.get('barcode') or None,
+        'barcode': barcode,
         'category': payload.get('category') or 'other',
         'unit': payload.get('unit') or 'PIECE',
         'sell_price': payload.get('sell_price') or 0,

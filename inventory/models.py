@@ -68,9 +68,10 @@ class InventoryItem(SyncModel):
     name = models.CharField(max_length=200)
     short_code = models.CharField(max_length=40, blank=True, help_text='Short label e.g. "Para500"')
     barcode = models.CharField(
-        max_length=64, null=True, blank=True, unique=True, db_index=True,
-        help_text='Scanned/printed barcode (UPC/EAN or a shop-assigned code). Null (not empty string) when '
-                   'unset so multiple barcode-less products never collide on the unique constraint.',
+        max_length=64, null=True, blank=True, db_index=True,
+        help_text='Scanned/printed barcode (UPC/EAN or a shop-assigned code). Unique per branch only (see '
+                   'Meta.constraints) -- other branches and other shops may reuse the same code. Null (not '
+                   'empty string) when unset.',
     )
     category = models.CharField(max_length=20, choices=CATEGORY_CHOICES, default='other')
     brand = models.CharField(max_length=100, blank=True)
@@ -115,6 +116,20 @@ class InventoryItem(SyncModel):
 
     class Meta:
         ordering = ['name']
+        constraints = [
+            # A barcode only has to be unambiguous INSIDE one branch, because
+            # that's the only place a scanner ever resolves it. It used to be
+            # `unique=True` on the column, i.e. unique across the whole
+            # database -- which meant a second shop (or a second branch of the
+            # same business) was told "already exists" for a code it had never
+            # seen. Soft-deleted rows are excluded so deleting a product frees
+            # its barcode for reuse instead of blocking it forever.
+            models.UniqueConstraint(
+                fields=['shop', 'barcode'],
+                condition=models.Q(is_deleted=False, barcode__isnull=False) & ~models.Q(barcode=''),
+                name='unique_barcode_per_branch',
+            ),
+        ]
 
     def __str__(self):
         return f'{self.name} ({self.quantity} in stock)'

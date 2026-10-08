@@ -124,6 +124,31 @@ class InventoryItemSerializer(serializers.ModelSerializer):
             data['barcode'] = None
         return super().to_internal_value(data)
 
+    def _target_shop(self):
+        """The ONE branch this product will live in -- the same branch
+        ShopScopedMixin.perform_create will save it under, or the existing
+        product's own branch on an edit. Barcodes are unique per branch, so
+        that's the only scope a duplicate check should look at."""
+        if self.instance is not None:
+            return self.instance.shop
+        view = self.context.get('view')
+        if view is not None and hasattr(view, 'get_current_shop'):
+            return view.get_current_shop()
+        return None
+
+    def validate_barcode(self, value):
+        if not value:
+            return None  # blank / whitespace-only means "no barcode", stored as NULL
+        shop = self._target_shop()
+        if shop is None:
+            return value
+        clash = InventoryItem.objects.filter(shop=shop, barcode=value, is_deleted=False)
+        if self.instance is not None:
+            clash = clash.exclude(pk=self.instance.pk)
+        if clash.exists():
+            raise serializers.ValidationError('This branch already has a product with that barcode.')
+        return value
+
 
 class InventoryItemDetailSerializer(InventoryItemSerializer):
     batches = StockBatchSerializer(many=True, read_only=True)
