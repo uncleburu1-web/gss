@@ -31,6 +31,11 @@ class SaleItemSerializer(serializers.ModelSerializer):
         item = attrs.get('item')
         variant = attrs.get('variant')
         quantity = attrs.get('quantity', 1)
+
+        if quantity < 1:
+            raise serializers.ValidationError({
+                'quantity': 'Quantity must be at least 1.'
+            })
         if variant is not None and item is not None and variant.item_id != item.id:
             raise serializers.ValidationError({'variant': 'That variant does not belong to this item.'})
         if item is not None and item.has_variants and variant is None:
@@ -124,6 +129,11 @@ class ReplaceSaleItemSerializer(serializers.Serializer):
         item = attrs.get('item')
         variant = attrs.get('variant')
         quantity = attrs.get('quantity', 1)
+
+        if quantity < 1:
+            raise serializers.ValidationError({
+                'quantity': 'Quantity must be at least 1.'
+            })
         if variant is not None and item is not None and variant.item_id != item.id:
             raise serializers.ValidationError({'variant': 'That variant does not belong to this item.'})
         if item is not None and item.has_variants and variant is None:
