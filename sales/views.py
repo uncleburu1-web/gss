@@ -5,6 +5,7 @@ from rest_framework.decorators import action
 from rest_framework.response import Response
 from django_filters.rest_framework import DjangoFilterBackend
 
+from core.idempotency import run_idempotent
 from core.mixins import ShopScopedMixin
 from core.permissions import HasCapability
 from realtime.events import broadcast
@@ -116,6 +117,11 @@ class SaleViewSet(ShopScopedMixin, viewsets.ModelViewSet):
             return [HasCapability('edit_sale')()]
         return super().get_permissions()
 
+    def create(self, request, *args, **kwargs):
+        # With an `Idempotency-Key` header a retried request returns the FIRST sale instead of ringing
+        # the customer up (and deducting stock) a second time. Without the header: unchanged.
+        return run_idempotent(request, lambda: super(SaleViewSet, self).create(request, *args, **kwargs))
+
     @transaction.atomic
     def perform_create(self, serializer):
         # Built manually rather than via serializer.save()/create(): FEFO
@@ -176,6 +182,10 @@ class SaleViewSet(ShopScopedMixin, viewsets.ModelViewSet):
 
     @action(detail=True, methods=['post'], url_path='add-payment')
     def add_payment(self, request, pk=None):
+        # A retried installment payment must be counted once, not twice.
+        return run_idempotent(request, lambda: self._add_payment(request, pk))
+
+    def _add_payment(self, request, pk):
         sale = self.get_object()
         serializer = AddPaymentSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)

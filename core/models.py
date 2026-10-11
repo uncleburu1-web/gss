@@ -281,3 +281,27 @@ class SyncModel(models.Model):
 
     class Meta:
         abstract = True
+
+
+class IdempotencyRecord(models.Model):
+    """The recorded outcome of a create request that carried an `Idempotency-Key` header.
+
+    The web and Android apps are online-only. If a "Charge" request reaches the server but the
+    response is lost, the cashier taps Charge again; without this, the customer is rung up twice and
+    stock is deducted twice. The client sends one key per cart attempt (and reuses it on a retry); the
+    first request's response is stored here and any retry with the same key gets that response back.
+
+    Scoped per user, so two cashiers can never collide on a key. `fingerprint` is a hash of the
+    request, so reusing a key for a DIFFERENT request is refused instead of silently returning the
+    wrong sale. Only successful (2xx) outcomes are stored: a failed attempt can be corrected and retried.
+    Old rows are safe to delete after a few days (see the prune_idempotency_records command)."""
+
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='+')
+    key = models.CharField(max_length=64)
+    fingerprint = models.CharField(max_length=64)
+    status_code = models.PositiveSmallIntegerField()
+    response_body = models.JSONField(null=True, blank=True)
+    created_at = models.DateTimeField(default=timezone.now, db_index=True)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=['user', 'key'], name='uniq_idempotency_user_key')]

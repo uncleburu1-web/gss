@@ -1,5 +1,6 @@
 from decimal import Decimal
 from django.db import models
+from django.utils import timezone
 from core.models import SyncModel
 from inventory.models import InventoryItem
 
@@ -23,6 +24,13 @@ class Sale(SyncModel):
 
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='completed')
     amount_paid = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal('0.00'))
+    receipt_no = models.CharField(
+        max_length=40, blank=True, default='', db_index=True,
+        help_text='What the till printed: <till code>-<counter>, e.g. "A3F9C2-000123". Unique BY CONSTRUCTION '
+                   'on each till (the code differs per till, the counter never repeats), which the plain '
+                   'per-till invoice_number is not. Deliberately NOT a unique constraint here: rejecting a '
+                   'sale over a numbering collision would lose a real sale for a cosmetic reason.',
+    )
     invoice_number = models.PositiveIntegerField(
         null=True, blank=True, db_index=True,
         help_text='Sequential, per-shop, for display on receipts (e.g. "Invoice #1042") — NOT a global '
@@ -41,7 +49,11 @@ class Sale(SyncModel):
         'staff.Worker', on_delete=models.SET_NULL, null=True, blank=True, related_name='sales'
     )
     payment_method = models.CharField(max_length=20, choices=PAYMENT_CHOICES, default='cash')
-    date = models.DateTimeField(auto_now_add=True)
+    # Was auto_now_add=True, which silently stamped every OFFLINE sale with the moment it
+    # finally synced instead of the moment it was rung up. default= (not auto_now_add) lets the
+    # sync handler record the till's own timestamp; editable=False keeps it read-only for every
+    # serializer/form, so only trusted server code (sync.views._apply_sale) can set it.
+    date = models.DateTimeField(default=timezone.now, editable=False)
 
     class Meta:
         ordering = ['-date']

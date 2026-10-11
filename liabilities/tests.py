@@ -1,8 +1,3 @@
-<<<<<<< HEAD
-from django.test import TestCase
-
-# Create your tests here.
-=======
 from decimal import Decimal
 
 from django.contrib.auth.models import User
@@ -162,4 +157,3 @@ class LiabilityCrossBranchTests(TestCase):
             'liability': liability_id, 'amount': '1000', 'payment_method': 'cash',
         }, format='json')
         self.assertEqual(pay_res.status_code, 400)
->>>>>>> 6f155c9 (Add expense support)

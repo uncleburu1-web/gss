@@ -67,11 +67,11 @@ class SaleSerializer(serializers.ModelSerializer):
     class Meta:
         model = Sale
         fields = [
-            'id', 'invoice_number', 'items', 'subtotal', 'discount', 'tax_amount', 'total', 'profit', 'margin_percent',
+            'id', 'invoice_number', 'receipt_no', 'items', 'subtotal', 'discount', 'tax_amount', 'total', 'profit', 'margin_percent',
             'status', 'amount_paid', 'balance_due',
             'customer', 'customer_name', 'staff_name', 'worker_name', 'payment_method', 'date',
         ]
-        read_only_fields = ['id', 'invoice_number', 'date', 'worker_name']
+        read_only_fields = ['id', 'invoice_number', 'receipt_no', 'date', 'worker_name']
 
     def validate_items(self, value):
         if not value:
