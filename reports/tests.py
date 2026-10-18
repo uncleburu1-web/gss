@@ -1,8 +1,3 @@
-<<<<<<< HEAD
-from django.test import TestCase
-
-# Create your tests here.
-=======
 from decimal import Decimal
 
 from django.contrib.auth.models import User
@@ -161,4 +156,3 @@ class LiabilityAnalyticsTests(TestCase):
         # nothing is actually still owed on it.
         self.assertNotIn('rent', analytics_res.data['by_category'])
         self.assertEqual(Decimal(analytics_res.data['by_category']['supplier_credit']), Decimal('8000.00'))
->>>>>>> 6f155c9 (Add expense support)

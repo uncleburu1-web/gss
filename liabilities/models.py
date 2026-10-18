@@ -28,28 +28,44 @@ class Liability(SyncModel):
     ]
 
     name = models.CharField(max_length=200)
+
     category = models.CharField(
         max_length=20,
         choices=CATEGORY_CHOICES,
-        default='other'
+        default='other',
     )
+
     owed_to = models.CharField(
         max_length=200,
         blank=True,
-        help_text='Who or which company this is owed to.'
+        help_text='Who or which company this is owed to.',
     )
+
     amount = models.DecimalField(
         max_digits=14,
         decimal_places=2,
-        help_text='The original amount owed — never edited after creation.'
+        help_text=(
+            'The original amount owed — never edited after creation; '
+            'see class docstring.'
+        ),
     )
-    due_date = models.DateField(null=True, blank=True)
+
+    due_date = models.DateField(
+        null=True,
+        blank=True,
+    )
+
     status = models.CharField(
         max_length=15,
         choices=STATUS_CHOICES,
         default='unpaid',
-        help_text='Maintained automatically from payments.'
+        help_text=(
+            'Maintained automatically from `payments` by refresh_status() '
+            '— not meant to be set directly by a client; '
+            'see LiabilityPaymentViewSet.'
+        ),
     )
+
     notes = models.TextField(blank=True)
 
     created_by = models.ForeignKey(
@@ -63,7 +79,7 @@ class Liability(SyncModel):
     cleared_at = models.DateTimeField(
         null=True,
         blank=True,
-        help_text='When status last became "cleared".'
+        help_text='When status last became "cleared".',
     )
 
     class Meta:
@@ -78,9 +94,9 @@ class Liability(SyncModel):
     @property
     def amount_paid(self):
         total = self.payments.filter(
-            is_deleted=False
+            is_deleted=False,
         ).aggregate(
-            total=models.Sum('amount')
+            total=models.Sum('amount'),
         )['total']
 
         return total or 0
@@ -112,7 +128,7 @@ class Liability(SyncModel):
                 update_fields=[
                     'status',
                     'cleared_at',
-                    'updated_at'
+                    'updated_at',
                 ]
             )
 
@@ -130,28 +146,28 @@ class LiabilityPayment(SyncModel):
         'salary',
         'rent',
         'utility',
-        'other'
+        'other',
     }
 
     liability = models.ForeignKey(
         Liability,
         on_delete=models.CASCADE,
-        related_name='payments'
+        related_name='payments',
     )
 
     amount = models.DecimalField(
         max_digits=14,
-        decimal_places=2
+        decimal_places=2,
     )
 
     payment_method = models.CharField(
         max_length=20,
         choices=PAYMENT_CHOICES,
-        default='cash'
+        default='cash',
     )
 
     paid_at = models.DateTimeField(
-        default=timezone.now
+        default=timezone.now,
     )
 
     recorded_by = models.ForeignKey(
@@ -164,7 +180,7 @@ class LiabilityPayment(SyncModel):
 
     notes = models.CharField(
         max_length=200,
-        blank=True
+        blank=True,
     )
 
     class Meta:
@@ -174,7 +190,10 @@ class LiabilityPayment(SyncModel):
         ]
 
     def __str__(self):
-        return f'{self.liability.name}: {self.amount} on {self.paid_at:%Y-%m-%d}'
+        return (
+            f'{self.liability.name}: {self.amount} '
+            f'on {self.paid_at:%Y-%m-%d}'
+        )
 
     @property
     def counts_as_expense(self):

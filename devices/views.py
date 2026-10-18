@@ -3,7 +3,7 @@ from rest_framework.views import APIView
 from rest_framework.response import Response
 
 from core.permissions import IsOwner
-from core.utils import get_shop_for_user, resolve_branch_for_device_login
+from core.utils import get_shop_for_user, resolve_branch_for_device_login, user_may_use_branch_device
 from .models import Device
 from .serializers import HeartbeatSerializer, DeviceSerializer
 
@@ -33,6 +33,20 @@ class HeartbeatView(APIView):
 
         existing = Device.objects.filter(id=data['device_id']).first()
         if existing is not None:
+            # A device id is a capability: knowing it must not let someone
+            # from another shop write to that device's row.
+            if not user_may_use_branch_device(request.user, existing.shop):
+                return Response({'detail': 'This device belongs to a different shop.'}, status=403)
+            # "Remove device" (DeviceDetailView) used to be undone by the very
+            # next heartbeat, which blindly set is_deleted=False. A removed
+            # desktop is now told so (410) and stays removed until it signs in
+            # again, which re-pairs it (core.auth_serializers). Phones have no
+            # pairing concept, so they keep the old always-reappear behaviour.
+            if existing.is_deleted and existing.device_type == 'desktop':
+                return Response(
+                    {'detail': 'This device was removed from the shop. Sign in again to pair it.'},
+                    status=410,
+                )
             shop = existing.shop
         elif data['device_type'] == 'desktop':
             # Heartbeat arrived before any login ever paired this device —

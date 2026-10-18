@@ -31,6 +31,11 @@ class SaleItemSerializer(serializers.ModelSerializer):
         item = attrs.get('item')
         variant = attrs.get('variant')
         quantity = attrs.get('quantity', 1)
+
+        if quantity < 1:
+            raise serializers.ValidationError({
+                'quantity': 'Quantity must be at least 1.'
+            })
         if variant is not None and item is not None and variant.item_id != item.id:
             raise serializers.ValidationError({'variant': 'That variant does not belong to this item.'})
         if item is not None and item.has_variants and variant is None:
@@ -67,11 +72,11 @@ class SaleSerializer(serializers.ModelSerializer):
     class Meta:
         model = Sale
         fields = [
-            'id', 'invoice_number', 'items', 'subtotal', 'discount', 'tax_amount', 'total', 'profit', 'margin_percent',
+            'id', 'invoice_number', 'receipt_no', 'items', 'subtotal', 'discount', 'tax_amount', 'total', 'profit', 'margin_percent',
             'status', 'amount_paid', 'balance_due',
             'customer', 'customer_name', 'staff_name', 'worker_name', 'payment_method', 'date',
         ]
-        read_only_fields = ['id', 'invoice_number', 'date', 'worker_name']
+        read_only_fields = ['id', 'invoice_number', 'receipt_no', 'date', 'worker_name']
 
     def validate_items(self, value):
         if not value:
@@ -102,6 +107,8 @@ class SaleSerializer(serializers.ModelSerializer):
 
 class AddPaymentSerializer(serializers.Serializer):
     amount = serializers.DecimalField(max_digits=12, decimal_places=2, min_value=Decimal('0.01'))
+    # Optional: how this installment was paid. Omitted -> the sale's own payment method, as before.
+    method = serializers.ChoiceField(choices=['cash', 'transfer', 'pos', 'other'], required=False)
 
 
 class ReplaceSaleItemSerializer(serializers.Serializer):
@@ -124,6 +131,11 @@ class ReplaceSaleItemSerializer(serializers.Serializer):
         item = attrs.get('item')
         variant = attrs.get('variant')
         quantity = attrs.get('quantity', 1)
+
+        if quantity < 1:
+            raise serializers.ValidationError({
+                'quantity': 'Quantity must be at least 1.'
+            })
         if variant is not None and item is not None and variant.item_id != item.id:
             raise serializers.ValidationError({'variant': 'That variant does not belong to this item.'})
         if item is not None and item.has_variants and variant is None:

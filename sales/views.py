@@ -5,10 +5,12 @@ from rest_framework.decorators import action
 from rest_framework.response import Response
 from django_filters.rest_framework import DjangoFilterBackend
 
+from core.idempotency import run_idempotent
 from core.mixins import ShopScopedMixin
 from core.permissions import HasCapability
 from realtime.events import broadcast
 from .models import Sale, SaleItem, SaleAllocation, next_invoice_number
+from .payments import recompute_paid, record_payment
 from .serializers import SaleSerializer, AddPaymentSerializer, ReplaceSaleItemSerializer
 
 
@@ -116,6 +118,11 @@ class SaleViewSet(ShopScopedMixin, viewsets.ModelViewSet):
             return [HasCapability('edit_sale')()]
         return super().get_permissions()
 
+    def create(self, request, *args, **kwargs):
+        # With an `Idempotency-Key` header a retried request returns the FIRST sale instead of ringing
+        # the customer up (and deducting stock) a second time. Without the header: unchanged.
+        return run_idempotent(request, lambda: super(SaleViewSet, self).create(request, *args, **kwargs))
+
     @transaction.atomic
     def perform_create(self, serializer):
         # Built manually rather than via serializer.save()/create(): FEFO
@@ -132,6 +139,9 @@ class SaleViewSet(ShopScopedMixin, viewsets.ModelViewSet):
             if not validated_data.get('staff_name'):
                 validated_data['staff_name'] = worker.full_name
 
+        # amount_paid is no longer stored from the request: it becomes a payment row below and is
+        # derived from the payments (sales.payments). The value sent is still what gets recorded.
+        requested_paid = validated_data.pop('amount_paid', None) or Decimal('0.00')
         sale = Sale.objects.create(shop=shop, invoice_number=next_invoice_number(shop), **validated_data)
 
         for item_data in items_data:
@@ -144,9 +154,9 @@ class SaleViewSet(ShopScopedMixin, viewsets.ModelViewSet):
             sale_item = SaleItem.objects.create(sale=sale, shop=shop, **item_data)
             _allocate_stock(sale_item, shop)
 
-        if sale.status == 'completed':
-            sale.amount_paid = sale.total
-            sale.save(update_fields=['amount_paid'])
+        paying = sale.total if sale.status == 'completed' else min(requested_paid, sale.total)
+        if paying > 0:
+            record_payment(sale, paying, sale.payment_method, source='web', user=self.request.user)
 
         serializer.instance = sale
         broadcast(shop, 'sale.created', {
@@ -170,21 +180,28 @@ class SaleViewSet(ShopScopedMixin, viewsets.ModelViewSet):
             _restore_stock(sale_item)
             sale_item.is_deleted = True
             sale_item.save(update_fields=['is_deleted', 'updated_at'])
+        instance.payments.update(is_deleted=True)
         instance.is_deleted = True
         instance.save(update_fields=['is_deleted', 'updated_at'])
         broadcast(instance.shop, 'sale.deleted', {'id': str(instance.id)})
 
     @action(detail=True, methods=['post'], url_path='add-payment')
     def add_payment(self, request, pk=None):
+        # A retried installment payment must be counted once, not twice.
+        return run_idempotent(request, lambda: self._add_payment(request, pk))
+
+    def _add_payment(self, request, pk):
         sale = self.get_object()
         serializer = AddPaymentSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         amount = serializer.validated_data['amount']
 
-        sale.amount_paid = min(sale.amount_paid + amount, sale.total)
-        if sale.amount_paid >= sale.total:
-            sale.status = 'completed'
-        sale.save()
+        # What is recorded is what was APPLIED to the balance, never more (same rule as before).
+        applied = min(amount, max(sale.total - sale.amount_paid, Decimal('0.00')))
+        if applied > 0:
+            record_payment(sale, applied, serializer.validated_data.get('method') or sale.payment_method,
+                           source='web', user=request.user)
+        sale.refresh_from_db()
         broadcast(sale.shop, 'sale.updated', {
             'id': str(sale.id), 'invoice_number': sale.invoice_number,
             'status': sale.status, 'balance_due': str(sale.balance_due),
@@ -247,10 +264,16 @@ class SaleViewSet(ShopScopedMixin, viewsets.ModelViewSet):
         sale = Sale.objects.prefetch_related('items').get(pk=sale.pk)
 
         # If this was a completed sale, keep amount_paid matched to the new
-        # total so a completed sale doesn't silently become "outstanding".
+        # total so a completed sale doesn't silently become "outstanding": the
+        # difference is recorded as its own payment (negative = money refunded).
         if sale.status == 'completed':
-            sale.amount_paid = sale.total
-            sale.save(update_fields=['amount_paid'])
+            delta = sale.total - sale.amount_paid
+            if delta != 0:
+                record_payment(sale, delta, sale.payment_method, source='web', user=request.user,
+                               reference='item replaced')
+            else:
+                recompute_paid(sale)
+            sale = Sale.objects.prefetch_related('items').get(pk=sale.pk)
 
         new_total = sale.total
         balance = new_total - old_total  # positive = customer owes more, negative = refund due
