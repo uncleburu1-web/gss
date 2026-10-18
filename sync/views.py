@@ -10,9 +10,13 @@ correctly treats as "still offline," so it just quietly kept the queue
 `pending` forever instead of failing loudly. Nothing below changes that
 contract — same request/response shape sync.js already sends and expects.
 """
+import hashlib
+import json
+import uuid
 from datetime import timedelta, timezone as dt_timezone
 
 from django.db import IntegrityError, transaction
+from rest_framework.exceptions import APIException, PermissionDenied, ValidationError
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -21,8 +25,9 @@ from django.utils.dateparse import parse_datetime
 
 from core.permissions import is_owner
 from core.capabilities import has_capability
-from core.utils import get_shop_for_user
+from core.utils import get_shop_for_user, user_may_use_branch_device
 from customers.models import Customer
+from devices.models import Device
 from inventory.models import InventoryItem, StockBatch
 from realtime.events import broadcast
 from sales.models import Sale, SaleItem, next_invoice_number
@@ -261,11 +266,75 @@ class _Duplicate(Exception):
     promises to tolerate."""
 
 
-def _already_applied(shop, op_id):
-    # Scoped to the shop on purpose: operation ids are client-generated
-    # UUIDs, and one shop must never learn (or be told "already applied")
-    # about another shop's operation just because the ids collided.
-    return SyncOperation.objects.filter(id=op_id, shop=shop).exists()
+DEVICE_HEADER = 'X-Device-ID'
+
+
+class _DeviceRemoved(APIException):
+    status_code = 410
+    default_detail = 'This device was removed from the shop. Sign in again to pair it.'
+    default_code = 'device_removed'
+
+
+def resolve_sync_scope(request):
+    """(shop, device) for a sync request.
+
+    A till sends X-Device-ID. Its branch is the one the device was PAIRED to at
+    login (core.auth_serializers), never something the request names, and the
+    signed-in user must be allowed on that branch (their own branch, or any
+    branch of the organization they own). This is what lets a CEO with several
+    branches sync from a till: get_shop_for_user() alone has no single branch
+    to return for them and refuses (G3 in the architecture analysis).
+
+    No header (web, Android, tills older than this): exactly the old behaviour.
+    A header naming a device the cloud has never seen also falls back to the old
+    behaviour, so a till whose pairing row is missing keeps syncing as before.
+    """
+    raw = (request.headers.get(DEVICE_HEADER) or '').strip()
+    if not raw:
+        return get_shop_for_user(request.user), None
+    try:
+        device_id = uuid.UUID(raw)
+    except ValueError:
+        raise ValidationError({DEVICE_HEADER: 'Must be a UUID.'})
+    device = Device.objects.select_related('shop').filter(id=device_id).first()
+    if device is None:
+        return get_shop_for_user(request.user), None
+    if not user_may_use_branch_device(request.user, device.shop):
+        raise PermissionDenied('This device belongs to a branch your account cannot use.')
+    if device.is_deleted and device.device_type == 'desktop':
+        raise _DeviceRemoved()
+    return device.shop, device
+
+
+def payload_hash(entity_type, entity_id, operation, payload):
+    """Stable fingerprint of what an operation SAYS (not when it was sent)."""
+    body = json.dumps(
+        {'entity_type': entity_type, 'entity_id': str(entity_id), 'operation': operation, 'payload': payload},
+        sort_keys=True, separators=(',', ':'), default=str,
+    )
+    return hashlib.sha256(body.encode()).hexdigest()
+
+
+_REUSED_ID_ERROR = 'This operation id was already used for different content; it was not applied.'
+
+
+def _replay_result(shop, op_id, op_hash):
+    """Outcome for an op id this shop has already recorded, or None if it hasn't.
+
+    Scoped to the shop on purpose: operation ids are client-generated UUIDs,
+    and one shop must never learn (or be told "already applied") about another
+    shop's operation just because the ids collided.
+
+    Same content -> already_applied (a retry after a lost response). Different
+    content -> rejected, so the till shows it as failed instead of believing a
+    change reached the cloud when it never did (G6). Rows recorded before
+    payload_hash existed have no hash to compare and are trusted as before."""
+    stored = SyncOperation.objects.filter(id=op_id, shop=shop).values_list('payload_hash', flat=True).first()
+    if stored is None:
+        return None
+    if stored and stored != op_hash:
+        return {'id': op_id, 'status': 'rejected', 'error': _REUSED_ID_ERROR}
+    return {'id': op_id, 'status': 'already_applied'}
 
 
 # How far ahead of the server's clock a till's sale timestamp may be before
@@ -306,7 +375,7 @@ class SyncPushView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request):
-        shop = get_shop_for_user(request.user)
+        shop, device = resolve_sync_scope(request)
         operations = request.data.get('operations') or []
         results = []
 
@@ -320,8 +389,10 @@ class SyncPushView(APIView):
             if not op_id or not entity_id:
                 continue  # malformed — nothing to key on, skip rather than crash the whole batch
 
-            if _already_applied(shop, op_id):
-                results.append({'id': op_id, 'status': 'already_applied'})
+            op_hash = payload_hash(entity_type, entity_id, operation, payload)
+            replay = _replay_result(shop, op_id, op_hash)
+            if replay is not None:
+                results.append(replay)
                 continue
 
             handler = _HANDLERS.get(entity_type)
@@ -367,13 +438,15 @@ class SyncPushView(APIView):
                         SyncOperation.objects.create(
                             id=op_id, shop=shop, entity_type=entity_type,
                             entity_id=entity_id, operation=operation,
+                            device=device, user=request.user, payload_hash=op_hash,
                         )
                     except IntegrityError:
                         raise _Duplicate()
                     handler(shop, entity_id, operation, payload)
             except _Duplicate:
-                if _already_applied(shop, op_id):
-                    results.append({'id': op_id, 'status': 'already_applied'})
+                replay = _replay_result(shop, op_id, op_hash)
+                if replay is not None:
+                    results.append(replay)
                 else:
                     results.append({
                         'id': op_id, 'status': 'rejected',
@@ -449,6 +522,17 @@ def _serialize_sale_item(o):
     }
 
 
+# How far back each pull's NEXT cursor reaches behind the moment this pull
+# started reading. `updated_at` is stamped when a row is saved, but the row
+# only becomes visible when its transaction COMMITS, which can be later. A
+# cursor set to "now" therefore skipped, forever, any row saved before the
+# query but committed after it (G4). Re-reading the last couple of minutes on
+# every pull closes that window; it is harmless because every applyPulled*
+# handler on the till is idempotent, and the till skips rows it already applied
+# at the same updated_at.
+PULL_CURSOR_OVERLAP = timedelta(minutes=2)
+
+
 class SyncPullView(APIView):
     """GET /api/sync/pull/?since=<ISO8601>&entity_types=product,stock_batch
 
@@ -469,7 +553,10 @@ class SyncPullView(APIView):
     }
 
     def get(self, request):
-        shop = get_shop_for_user(request.user)
+        shop, _device = resolve_sync_scope(request)
+        # Taken BEFORE reading anything: next_since is measured from the
+        # moment our snapshot could start missing late commits.
+        read_started = timezone.now()
         since_param = request.query_params.get('since')
         since = parse_datetime(since_param) if since_param else None
         requested = request.query_params.get('entity_types')
@@ -493,7 +580,13 @@ class SyncPullView(APIView):
                     'updated_at': obj.updated_at.isoformat(),
                 })
 
-        return Response({'operations': operations, 'server_time': timezone.now().isoformat()})
+        return Response({
+            'operations': operations,
+            'server_time': timezone.now().isoformat(),
+            # The cursor to send as `since` next time (see PULL_CURSOR_OVERLAP).
+            # server_time stays exactly as before for older tills and displays.
+            'next_since': (read_started - PULL_CURSOR_OVERLAP).isoformat(),
+        })
 
 
 class SyncReconcileView(APIView):
@@ -524,7 +617,7 @@ class SyncReconcileView(APIView):
     }
 
     def get(self, request):
-        shop = get_shop_for_user(request.user)
+        shop, _device = resolve_sync_scope(request)
         counts = {}
         for entity_type, model in self.models.items():
             qs = model.objects.filter(shop=shop)

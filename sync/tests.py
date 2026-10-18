@@ -24,6 +24,7 @@ from realtime.models import RealtimeEvent
 from sales.models import Sale
 from staff.models import Worker
 
+from . import views as sync_views
 from .models import SyncOperation
 
 PUSH_URL = '/api/sync/push/'
@@ -110,7 +111,14 @@ class IdempotencyTests(TestCase):
             entity_id=operation['entity_id'], operation='create',
         )
 
-        with mock.patch('sync.views._already_applied', side_effect=[False, True]):
+        real_replay = sync_views._replay_result
+        calls = []
+
+        def pre_check_misses_then_real(*args):
+            calls.append(args)
+            return None if len(calls) == 1 else real_replay(*args)
+
+        with mock.patch('sync.views._replay_result', side_effect=pre_check_misses_then_real):
             _, results = push(client_for(self.user_a), operation)
 
         self.assertEqual(results[operation['id']]['status'], 'already_applied')
