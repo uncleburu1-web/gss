@@ -31,6 +31,7 @@ from devices.models import Device
 from inventory.models import InventoryItem, StockBatch
 from realtime.events import broadcast
 from sales.models import Sale, SaleItem, next_invoice_number
+from sales.payments import apply_legacy_amount_paid, record_payment, recompute_paid, serialize_payment
 from sales.views import _allocate_stock, _restore_stock
 
 from .models import SyncOperation
@@ -50,9 +51,20 @@ class _Skip(Exception):
 
 # --- one handler per entity_type sync.js can send --------------------------
 
-def _apply_product(shop, entity_id, operation, payload):
+def _is_repeat_create(model, shop, entity_id, operation):
+    """A 'create' for a row the cloud already has is a RE-SEND, never new information: tills
+    only ever create these rows once, under a fresh id. Older tills re-sent their whole history
+    as creates at every startup (desktop reconcileUnsyncedRows); applying those overwrote newer
+    cloud values (an owner's price change, a batch's real remaining stock) with stale copies.
+    So a repeated create changes nothing."""
+    return operation == 'create' and model.objects.filter(id=entity_id, shop=shop).exists()
+
+
+def _apply_product(shop, entity_id, operation, payload, ctx=None):
     if operation == 'delete':
         InventoryItem.objects.filter(id=entity_id, shop=shop).update(is_deleted=True)
+        return
+    if _is_repeat_create(InventoryItem, shop, entity_id, operation):
         return
     barcode = payload.get('barcode') or None
     # Barcodes are unique per branch (not globally) -- reject a clash with a
@@ -86,10 +98,12 @@ def _apply_product(shop, entity_id, operation, payload):
     InventoryItem.objects.update_or_create(id=entity_id, shop=shop, defaults=defaults)
 
 
-def _apply_stock_batch(shop, entity_id, operation, payload):
+def _apply_stock_batch(shop, entity_id, operation, payload, ctx=None):
     if operation == 'delete':
         StockBatch.objects.filter(id=entity_id, shop=shop).update(is_deleted=True)
         return
+    if _is_repeat_create(StockBatch, shop, entity_id, operation):
+        return  # above all: never let a till's copy overwrite the cloud's quantity_remaining
     try:
         item = InventoryItem.objects.get(id=payload['product_id'], shop=shop)
     except (InventoryItem.DoesNotExist, KeyError):
@@ -116,9 +130,11 @@ def _apply_stock_batch(shop, entity_id, operation, payload):
     StockBatch.objects.update_or_create(id=entity_id, shop=shop, defaults=defaults)
 
 
-def _apply_customer(shop, entity_id, operation, payload):
+def _apply_customer(shop, entity_id, operation, payload, ctx=None):
     if operation == 'delete':
         Customer.objects.filter(id=entity_id, shop=shop).update(is_deleted=True)
+        return
+    if _is_repeat_create(Customer, shop, entity_id, operation):
         return
     defaults = {
         'name': payload.get('name', ''),
@@ -130,7 +146,7 @@ def _apply_customer(shop, entity_id, operation, payload):
     Customer.objects.update_or_create(id=entity_id, shop=shop, defaults=defaults)
 
 
-def _apply_sale(shop, entity_id, operation, payload):
+def _apply_sale(shop, entity_id, operation, payload, ctx=None):
     if operation == 'delete':
         try:
             sale = Sale.objects.get(id=entity_id, shop=shop)
@@ -140,16 +156,18 @@ def _apply_sale(shop, entity_id, operation, payload):
             _restore_stock(sale_item)
             sale_item.is_deleted = True
             sale_item.save(update_fields=['is_deleted', 'updated_at'])
+        sale.payments.update(is_deleted=True)
         sale.is_deleted = True
         sale.save(update_fields=['is_deleted', 'updated_at'])
         return
+    if _is_repeat_create(Sale, shop, entity_id, operation):
+        return  # a re-sent header must not reset a status or customer changed since
 
     defaults = {
         'customer_name': payload.get('customer_name') or 'Walk-in',
         'staff_name': payload.get('staff_name') or '',
         'payment_method': payload.get('payment_method') or 'cash',
         'status': payload.get('status') or 'completed',
-        'amount_paid': payload.get('amount_paid') or 0,
     }
     customer_id = payload.get('customer_id')
     if customer_id:
@@ -181,10 +199,13 @@ def _apply_sale(shop, entity_id, operation, payload):
         # from an older client that never sent one — never on an update,
         # which would silently renumber an already-numbered sale.
         defaults['invoice_number'] = next_invoice_number(shop)
-    Sale.objects.update_or_create(id=entity_id, shop=shop, defaults=defaults)
+    sale, _created = Sale.objects.update_or_create(id=entity_id, shop=shop, defaults=defaults)
+    # An older till sends the ABSOLUTE amount paid. It becomes the sale's one legacy payment, and it
+    # can never reduce money the cloud already has (e.g. an installment taken on the web meanwhile).
+    apply_legacy_amount_paid(sale, payload.get('amount_paid') or 0)
 
 
-def _apply_sale_item(shop, entity_id, operation, payload):
+def _apply_sale_item(shop, entity_id, operation, payload, ctx=None):
     if operation == 'delete':
         SaleItem.objects.filter(id=entity_id, shop=shop).update(is_deleted=True)
         return
@@ -222,9 +243,140 @@ def _apply_sale_item(shop, entity_id, operation, payload):
         _allocate_stock(sale_item, shop)
 
     if sale.status == 'completed':
-        sale.amount_paid = sale.total
-        sale.save(update_fields=['amount_paid'])
+        apply_legacy_amount_paid(sale, sale.total)
 
+
+def _uuid_or_none(value):
+    try:
+        return uuid.UUID(str(value)) if value else None
+    except ValueError:
+        return None
+
+
+def _sale_header_defaults(shop, entity_id, payload, creating):
+    defaults = {
+        'customer_name': payload.get('customer_name') or 'Walk-in',
+        'staff_name': payload.get('staff_name') or '',
+        'payment_method': payload.get('payment_method') or 'cash',
+        'status': payload.get('status') or 'completed',
+    }
+    receipt_no = payload.get('receipt_no')
+    if receipt_no:
+        defaults['receipt_no'] = str(receipt_no)[:40]
+    if payload.get('invoice_number'):
+        defaults['invoice_number'] = payload['invoice_number']
+    elif creating:
+        defaults['invoice_number'] = next_invoice_number(shop)
+    if creating:
+        sale_date = _sale_date_from_payload(payload)
+        if sale_date is not None:
+            defaults['date'] = sale_date
+    return defaults
+
+
+def _apply_sale_doc(shop, entity_id, operation, payload, ctx=None):
+    """A whole sale in ONE operation (sync protocol 2): header, every line, every payment.
+
+    Runs inside the caller's transaction together with the SyncOperation claim, so the cloud
+    either has the complete sale (lines, stock allocations, payments) or nothing of it. Before
+    this, the header and each line were separate operations in separate transactions, and a
+    report could see a sale with only some of its lines (G1). Every part is keyed by the till's
+    own ids, so a replay creates nothing twice."""
+    ctx = ctx or {}
+    if operation != 'create':
+        raise ValueError('A sale_doc can only be created; changes travel as their own operations.')
+    items = payload.get('items')
+    if not isinstance(items, list) or not items:
+        raise ValueError('A sale must have at least one line.')
+    payments = payload.get('payments') or []
+    if not isinstance(payments, list):
+        raise ValueError('payments must be a list.')
+
+    # Everything this sale points at must already be in the cloud; otherwise wait (not a rejection).
+    customer = None
+    if payload.get('customer_id'):
+        customer = Customer.objects.filter(id=payload['customer_id'], shop=shop).first()
+        if customer is None:
+            raise _Skip()
+    products = {}
+    for line in items:
+        if not isinstance(line, dict) or not line.get('id'):
+            raise ValueError('Every sale line needs its own id.')
+        product_id = line.get('product_id')
+        if product_id and product_id not in products:
+            product = InventoryItem.objects.filter(id=product_id, shop=shop).first()
+            if product is None:
+                raise _Skip()
+            products[product_id] = product
+
+    creating = not Sale.objects.filter(id=entity_id, shop=shop).exists()
+    defaults = _sale_header_defaults(shop, entity_id, payload, creating)
+    if customer is not None:
+        defaults['customer'] = customer
+    if creating:
+        defaults['device'] = ctx.get('device')
+        defaults['received_at'] = timezone.now()
+        worker = getattr(ctx.get('user'), 'worker', None)
+        if worker is not None:
+            defaults['worker'] = worker
+    if creating:
+        sale = Sale.objects.create(id=entity_id, shop=shop, **defaults)
+    else:
+        # Already here (a re-send, or the old protocol got it first): keep the cloud's header as it
+        # is and only add any line or payment it does not have yet.
+        sale = Sale.objects.get(id=entity_id, shop=shop)
+
+    for line in items:
+        existing = SaleItem.objects.filter(id=line['id']).first()
+        if existing is not None:
+            if existing.sale_id != sale.id:
+                raise ValueError('A sale line id is already used by a different sale.')
+            continue  # already applied: never allocate stock twice
+        item = products.get(line.get('product_id')) if line.get('product_id') else None
+        sale_item = SaleItem.objects.create(
+            id=line['id'], shop=shop, sale=sale, item=item,
+            item_name=line.get('item_name', ''), category=line.get('category') or '',
+            quantity=line.get('quantity') or 1, unit_price=line.get('unit_price') or 0,
+            discount=line.get('discount') or 0,
+        )
+        if item is not None:
+            _allocate_stock(sale_item, shop)  # the cloud's own FEFO, as for every other sale
+
+    for p in payments:
+        if not isinstance(p, dict) or not p.get('id'):
+            raise ValueError('Every payment needs its own id.')
+        record_payment(
+            sale, p.get('amount') or 0, p.get('method'), source='till', payment_id=p['id'],
+            paid_at=parse_datetime(p['paid_at']) if isinstance(p.get('paid_at'), str) else None,
+            tendered=p.get('tendered'), change_given=p.get('change_given'), reference=p.get('reference') or '',
+            shift_ref=_uuid_or_none(p.get('shift_id')), device=ctx.get('device'), user=ctx.get('user'),
+        )
+    recompute_paid(sale)
+
+
+def _apply_sale_payment(shop, entity_id, operation, payload, ctx=None):
+    """One payment taken on the till against an existing sale (an installment). Append-only:
+    the cloud ADDS it, so a payment taken on the web meanwhile is never overwritten (G2)."""
+    ctx = ctx or {}
+    if operation != 'create':
+        raise ValueError('A payment can only be created.')
+    sale = Sale.objects.filter(id=payload.get('sale_id'), shop=shop).first()
+    if sale is None:
+        raise _Skip()  # its sale hasn't arrived yet
+    if sale.is_deleted:
+        raise ValueError('That sale was deleted, so the payment was not recorded.')
+    record_payment(
+        sale, payload.get('amount') or 0, payload.get('method'), source='till', payment_id=entity_id,
+        paid_at=parse_datetime(payload['paid_at']) if isinstance(payload.get('paid_at'), str) else None,
+        tendered=payload.get('tendered'), change_given=payload.get('change_given'),
+        reference=payload.get('reference') or '', shift_ref=_uuid_or_none(payload.get('shift_id')),
+        device=ctx.get('device'), user=ctx.get('user'),
+    )
+
+
+# What this cloud understands. Sent with every pull so a till only switches to sale_doc and
+# sale_payment once the cloud it talks to can apply them.
+SYNC_PROTOCOL = 2
 
 _HANDLERS = {
     'product': _apply_product,
@@ -232,6 +384,8 @@ _HANDLERS = {
     'customer': _apply_customer,
     'sale': _apply_sale,
     'sale_item': _apply_sale_item,
+    'sale_doc': _apply_sale_doc,
+    'sale_payment': _apply_sale_payment,
 }
 
 # Same events a REST create/update/delete on the equivalent resource would
@@ -243,6 +397,7 @@ _HANDLERS = {
 _EVENT_ENTITY = {
     'product': 'inventoryitem', 'stock_batch': 'stockbatch',
     'customer': 'customer', 'sale': 'sale', 'sale_item': 'saleitem',
+    'sale_doc': 'sale', 'sale_payment': 'sale',
 }
 _EVENT_VERB = {'create': 'created', 'update': 'updated', 'delete': 'deleted'}
 
@@ -256,6 +411,7 @@ _EVENT_VERB = {'create': 'created', 'update': 'updated', 'delete': 'deleted'}
 # otherwise only require *any* authenticated device on the right shop.
 # Sale/sale_item/customer stay open to every role, exactly as on web.
 _OWNER_ONLY_ENTITIES = {'product', 'stock_batch'}
+_REPEAT_MODELS = {'product': InventoryItem, 'stock_batch': StockBatch}
 
 
 class _Duplicate(Exception):
@@ -403,6 +559,15 @@ class SyncPushView(APIView):
                 })
                 continue
 
+            if entity_type in _OWNER_ONLY_ENTITIES and _is_repeat_create(
+                _REPEAT_MODELS[entity_type], shop, entity_id, operation,
+            ):
+                # A till re-sending a product/batch the cloud already has (any role): nothing to
+                # apply, and nothing to refuse either. Rejecting it left sellers' tills with a
+                # pile of permanent "failed" rows for products they never created.
+                results.append({'id': op_id, 'status': 'already_applied'})
+                continue
+
             if entity_type in _OWNER_ONLY_ENTITIES and not is_owner(request.user):
                 results.append({
                     'id': op_id, 'status': 'rejected',
@@ -442,7 +607,7 @@ class SyncPushView(APIView):
                         )
                     except IntegrityError:
                         raise _Duplicate()
-                    handler(shop, entity_id, operation, payload)
+                    handler(shop, entity_id, operation, payload, {'device': device, 'user': request.user})
             except _Duplicate:
                 replay = _replay_result(shop, op_id, op_hash)
                 if replay is not None:
@@ -459,11 +624,12 @@ class SyncPushView(APIView):
                 results.append({'id': op_id, 'status': 'rejected', 'error': str(exc)})
                 continue
 
-            broadcast(
-                shop,
-                f'{_EVENT_ENTITY.get(entity_type, entity_type)}.{_EVENT_VERB.get(operation, operation)}',
-                {'id': entity_id},
-            )
+            if entity_type == 'sale_payment':
+                event, event_payload = 'sale.updated', {'id': str(payload.get('sale_id'))}
+            else:
+                event = f'{_EVENT_ENTITY.get(entity_type, entity_type)}.{_EVENT_VERB.get(operation, operation)}'
+                event_payload = {'id': entity_id}
+            broadcast(shop, event, event_payload)
             results.append({'id': op_id, 'status': 'applied'})
 
         return Response({'results': results})
@@ -510,6 +676,8 @@ def _serialize_sale(o):
         'payment_method': o.payment_method, 'status': o.status,
         'amount_paid': str(o.amount_paid), 'invoice_number': o.invoice_number,
         'receipt_no': o.receipt_no or None, 'date': o.date.isoformat(),
+        # Every payment, so a till sees installments taken elsewhere. Uses the prefetch in SyncPullView.
+        'payments': [serialize_payment(p) for p in o.payments.all() if not p.is_deleted],
     }
 
 
@@ -569,6 +737,8 @@ class SyncPullView(APIView):
                 continue
             model, serialize = spec
             qs = model.objects.filter(shop=shop)
+            if model is Sale:
+                qs = qs.prefetch_related('payments')
             if since:
                 qs = qs.filter(updated_at__gt=since)
             for obj in qs:
@@ -586,6 +756,7 @@ class SyncPullView(APIView):
             # The cursor to send as `since` next time (see PULL_CURSOR_OVERLAP).
             # server_time stays exactly as before for older tills and displays.
             'next_since': (read_started - PULL_CURSOR_OVERLAP).isoformat(),
+            'sync_protocol': SYNC_PROTOCOL,
         })
 
 

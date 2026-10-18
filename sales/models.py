@@ -1,4 +1,5 @@
 from decimal import Decimal
+from django.conf import settings
 from django.db import models
 from django.utils import timezone
 from core.models import SyncModel
@@ -54,6 +55,14 @@ class Sale(SyncModel):
     # sync handler record the till's own timestamp; editable=False keeps it read-only for every
     # serializer/form, so only trusted server code (sync.views._apply_sale) can set it.
     date = models.DateTimeField(default=timezone.now, editable=False)
+    device = models.ForeignKey(
+        'devices.Device', on_delete=models.SET_NULL, null=True, blank=True, related_name='sales',
+        help_text='The till that rang it up, when it came from a till. Null for web/Android and older tills.',
+    )
+    received_at = models.DateTimeField(
+        null=True, blank=True,
+        help_text='When the cloud received it. `date` is when it was rung up; a large gap means it was sold offline.',
+    )
 
     class Meta:
         ordering = ['-date']
@@ -185,3 +194,51 @@ class SaleAllocation(SyncModel):
 
     def __str__(self):
         return f'{self.sale_item_id} -> batch {self.batch_id}: {self.quantity}'
+
+
+class SalePayment(SyncModel):
+    """One payment taken against a sale: one row per method used, so a sale can be paid by
+    cash + transfer + card, and an installment sale collects several payments over time.
+
+    Append-only. Sale.amount_paid is DERIVED from these rows (sales.payments.recompute_paid),
+    never written from a client's absolute number: two payments taken on two devices while
+    offline both count instead of one overwriting the other (G2 in the architecture analysis).
+    `amount` is what was applied to the sale; for cash, `tendered` is what the customer handed
+    over and `change_given` what went back. A negative amount is a refund (e.g. an item swapped
+    for a cheaper one)."""
+    METHOD_CHOICES = Sale.PAYMENT_CHOICES + [('other', 'Other')]
+    SOURCE_CHOICES = [
+        ('till', 'Desktop till'),
+        ('web', 'Web / Android'),
+        ('legacy', 'Recorded before payments were itemised'),
+    ]
+
+    sale = models.ForeignKey(Sale, on_delete=models.CASCADE, related_name='payments')
+    method = models.CharField(max_length=20, choices=METHOD_CHOICES, default='cash')
+    amount = models.DecimalField(max_digits=12, decimal_places=2)
+    tendered = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
+    change_given = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal('0.00'))
+    reference = models.CharField(max_length=100, blank=True, default='')
+    paid_at = models.DateTimeField(default=timezone.now)
+    source = models.CharField(
+        max_length=10, choices=SOURCE_CHOICES, default='till',
+        help_text='"legacy" = one lump payment standing in for an amount recorded before payments were '
+                  'itemised (backfill, or an older till). A till that already has its own itemised '
+                  'payments for the sale must not add a legacy row on top (it would count twice).',
+    )
+    shift_ref = models.UUIDField(
+        null=True, blank=True,
+        help_text="The till's shift id, kept as a plain reference until shifts are uploaded (stage 3).",
+    )
+    device = models.ForeignKey(
+        'devices.Device', on_delete=models.SET_NULL, null=True, blank=True, related_name='sale_payments',
+    )
+    recorded_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name='+',
+    )
+
+    class Meta:
+        ordering = ['paid_at', 'created_at']
+
+    def __str__(self):
+        return f'{self.method} {self.amount} on sale {self.sale_id}'
