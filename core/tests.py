@@ -126,3 +126,20 @@ class ControlCenterViewTests(TestCase):
             'changes': [{'role': 'seller', 'capability': 'nonexistent', 'allowed': True}],
         }, format='json')
         self.assertEqual(res.status_code, 400)
+
+
+class CorsPreflightTests(TestCase):
+    """The browser asks permission (an OPTIONS preflight) before sending custom headers. If a header
+    the web/Android app sends is not allowed here, every such request fails in the browser before it
+    reaches Django -- which is exactly how web sales broke when Idempotency-Key shipped (19 Oct 2026)."""
+
+    def test_the_headers_the_apps_send_are_allowed(self):
+        from django.conf import settings
+        origin = settings.CORS_ALLOWED_ORIGINS[0]
+        response = self.client.options(
+            '/api/sales/', HTTP_ORIGIN=origin, HTTP_ACCESS_CONTROL_REQUEST_METHOD='POST',
+            HTTP_ACCESS_CONTROL_REQUEST_HEADERS='authorization,content-type,idempotency-key,x-branch-id',
+        )
+        allowed = response.headers.get('access-control-allow-headers', '').lower()
+        for header in ('idempotency-key', 'x-branch-id', 'authorization', 'content-type'):
+            self.assertIn(header, allowed)
