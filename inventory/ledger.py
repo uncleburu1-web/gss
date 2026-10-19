@@ -169,6 +169,7 @@ def drift(shop=None):
             problems.append({
                 'batch_id': str(batch.id), 'item_id': str(batch.item_id), 'item_name': batch.item.name,
                 'shop_id': str(batch.shop_id), 'quantity_remaining': int(expected),
-                'ledger_total': str(ledger), 'difference': str(expected - ledger),
+                'ledger_total': str(Decimal(ledger).quantize(Decimal('0.001'))),
+                'difference': str((expected - ledger).quantize(Decimal('0.001'))),
             })
     return problems

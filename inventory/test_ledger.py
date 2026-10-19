@@ -314,7 +314,7 @@ class DriftCommandTests(LedgerBase):
         with self.assertRaises(SystemExit) as raised:
             call_command('check_stock_drift', stdout=StringIO())
         self.assertEqual(raised.exception.code, 1)
-        self.assertEqual(ledger.drift(self.shop)[0]['difference'], '89')
+        self.assertEqual(ledger.drift(self.shop)[0]['difference'], '89.000')
 
 
 class TillBatchReceiptTests(LedgerBase):
