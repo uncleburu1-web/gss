@@ -12,6 +12,7 @@ from core.permissions import IsOwnerOrReadOnly, is_owner
 from core.mixins import ShopScopedMixin
 from realtime.events import broadcast
 from .cloudinary_utils import InvalidProductImage, delete_product_image, upload_product_image, validate_product_image
+import audit
 from . import ledger
 from .models import InventoryItem, ItemVariant, StockBatch, StockMovement
 from .serializers import (
@@ -97,6 +98,9 @@ class InventoryItemViewSet(ShopScopedMixin, viewsets.ModelViewSet):
                     item.shop, item, data['quantity'], data['reason'],
                     variant=self._variant_for(item, data.get('variant')), user=request.user, source='web',
                 )
+                audit.record('stock.damage', shop=item.shop, user=request.user, target=item, reason=data['reason'],
+                             summary=f"Wrote off {-sum(m.quantity for m in movements)} x {item.name} as damaged",
+                             data={'quantity': str(data['quantity'])})
         except ledger.LedgerError as exc:
             return Response({'detail': str(exc)}, status=400)
         self._after_stock_change(item, movements)
@@ -121,6 +125,12 @@ class InventoryItemViewSet(ShopScopedMixin, viewsets.ModelViewSet):
                     item.shop, item, data['counted_quantity'], data['reason'],
                     variant=self._variant_for(item, data.get('variant')), user=request.user, source='web',
                 )
+                if movements:
+                    audit.record('stock.count', shop=item.shop, user=request.user, target=item, reason=data['reason'],
+                                 summary=f'Stock count of {item.name}: system {movements[0].system_quantity}, '
+                                         f'counted {movements[0].counted_quantity}',
+                                 data={'system': str(movements[0].system_quantity),
+                                       'counted': str(movements[0].counted_quantity)})
         except ledger.LedgerError as exc:
             return Response({'detail': str(exc)}, status=400)
         if movements:
@@ -222,6 +232,9 @@ class StockBatchViewSet(ShopScopedMixin, viewsets.ModelViewSet):
         if instance.quantity_remaining:
             ledger.record(instance.shop, instance, -instance.quantity_remaining, StockMovement.ADJUSTMENT,
                           user=self.request.user, reason='Batch deleted', reference=('stock_batch', instance.id))
+        audit.record('stock.batch_deleted', shop=instance.shop, user=self.request.user, target=instance,
+                     summary=f'Deleted batch {instance.batch_number or instance.id} of {instance.item.name} '
+                             f'({instance.quantity_remaining} left in it)')
         super().perform_destroy(instance)
 
 

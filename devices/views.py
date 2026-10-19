@@ -102,4 +102,7 @@ class DeviceDetailView(APIView):
             return Response({'detail': 'Device not found.'}, status=404)
         device.is_deleted = True
         device.save(update_fields=['is_deleted', 'updated_at'])
+        import audit
+        audit.record('device.removed', shop=shop, user=request.user, target=device,
+                     summary=f'Removed device {device.name or device.id}')
         return Response(status=204)

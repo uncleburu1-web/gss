@@ -57,7 +57,8 @@ class Subscription(models.Model):
         help_text='When the current paid period ends. Blank = no expiry enforced (e.g. a comped org).',
     )
     grace_period_days = models.PositiveIntegerField(
-        default=3, help_text='Days after current_period_end before cloud services actually cut off.',
+        default=0, help_text='Days after current_period_end before cloud services actually cut off. '
+                             '0 = they stop the moment the period ends (the business rule since 2026-10).',
     )
     auto_renew = models.BooleanField(default=True)
     last_payment_at = models.DateTimeField(null=True, blank=True)
@@ -184,6 +185,10 @@ def record_successful_payment(organization, reference, amount_kobo, billing_cycl
     # this org) should see cloud sync come back / the "please subscribe"
     # banner clear the instant the OWNER finishes paying somewhere else —
     # not just whenever they next happen to refresh.
+    import audit
+    audit.record('subscription.paid', organization=organization, source='system', actor_name='Paystack',
+                 summary=f'Payment {reference} received; paid until {sub.current_period_end:%Y-%m-%d}',
+                 data={'reference': reference, 'amount_kobo': amount_kobo})
     from realtime.events import broadcast
     for shop in organization.branches.all():
         broadcast(shop, 'subscription.updated', {'effective_status': sub.effective_status})

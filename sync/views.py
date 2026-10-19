@@ -30,6 +30,7 @@ from core.capabilities import has_capability
 from core.utils import get_shop_for_user, user_may_use_branch_device
 from customers.models import Customer
 from devices.models import Device
+import audit
 from inventory import ledger
 from inventory.models import InventoryItem, StockBatch, StockMovement
 from realtime.events import broadcast
@@ -171,6 +172,9 @@ def _apply_sale(shop, entity_id, operation, payload, ctx=None):
         sale.payments.update(is_deleted=True)
         sale.is_deleted = True
         sale.save(update_fields=['is_deleted', 'updated_at'])
+        audit.record('sale.deleted', shop=shop, user=(ctx or {}).get('user'), target=sale, source='till',
+                     device=(ctx or {}).get('device'),
+                     summary=f'Deleted sale #{sale.invoice_number} ({sale.total}) on a till')
         return
     if _is_repeat_create(Sale, shop, entity_id, operation):
         return  # a re-sent header must not reset a status or customer changed since
@@ -447,7 +451,14 @@ def _apply_shift(shop, entity_id, operation, payload, ctx=None):
     }
     if existing is None:
         defaults['device'] = ctx.get('device')
-    Shift.objects.update_or_create(id=entity_id, shop=shop, defaults=defaults)
+    shift, _ = Shift.objects.update_or_create(id=entity_id, shop=shop, defaults=defaults)
+    if closed:
+        audit.record('shift.closed', shop=shop, user=shift.user, target=shift, source='till', device=ctx.get('device'),
+                     actor_name=shift.owner_username,
+                     summary=f'Z-report #{shift.z_number}: expected {shift.expected_cash}, counted {shift.counted_cash}, '
+                             f'variance {shift.variance}',
+                     data={'variance': str(shift.variance), 'expected': str(shift.expected_cash),
+                           'counted': str(shift.counted_cash)})
 
 
 def _apply_cash_movement(shop, entity_id, operation, payload, ctx=None):
@@ -506,10 +517,18 @@ def _apply_stock_movement(shop, entity_id, operation, payload, ctx=None):
         if quantity <= 0:
             return  # nothing left on the cloud's side to write off
         ledger.record_damage(shop, item, quantity, payload.get('reason') or '', **common)
+        audit.record('stock.damage', shop=shop, user=user, target=item, source='till', device=ctx.get('device'),
+                     actor_name=payload.get('actor') or None, reason=payload.get('reason') or '',
+                     summary=f'Wrote off {quantity} x {item.name} as damaged', data={'quantity': quantity})
     elif kind == 'adjustment':
         if not is_owner(user):
             raise ValueError('Only an owner can adjust stock after a count.')
-        ledger.record_stock_count(shop, item, payload.get('counted_quantity'), payload.get('reason') or '', **common)
+        moves = ledger.record_stock_count(shop, item, payload.get('counted_quantity'), payload.get('reason') or '', **common)
+        if moves:
+            audit.record('stock.count', shop=shop, user=user, target=item, source='till', device=ctx.get('device'),
+                         actor_name=payload.get('actor') or None, reason=payload.get('reason') or '',
+                         summary=f'Stock count of {item.name}: system {moves[0].system_quantity}, counted {moves[0].counted_quantity}',
+                         data={'system': str(moves[0].system_quantity), 'counted': str(moves[0].counted_quantity)})
     else:
         raise ValueError('Unknown stock movement kind.')
 

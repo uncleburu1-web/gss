@@ -1,6 +1,7 @@
 from django.db import transaction
 from rest_framework import serializers
 
+import audit
 from . import ledger
 from .models import InventoryItem, ItemVariant, StockBatch, StockMovement
 
@@ -98,6 +99,9 @@ class StockBatchSerializer(serializers.ModelSerializer):
             batch = super().update(instance, validated_data)
             ledger.record(batch.shop, batch, delta, StockMovement.RECEIPT, user=self._ledger_user(),
                           reason='Received quantity corrected', reference=('stock_batch', batch.id))
+            audit.record('stock.receipt_corrected', shop=batch.shop, user=self._ledger_user(), target=batch,
+                         summary=f'Changed received quantity of {batch.item.name} batch {batch.batch_number} '
+                                 f'by {delta:+d}', data={'delta': delta})
             return batch
         return super().update(instance, validated_data)
 

@@ -8,6 +8,7 @@ from django_filters.rest_framework import DjangoFilterBackend
 from core.idempotency import run_idempotent
 from core.mixins import ShopScopedMixin
 from core.permissions import HasCapability
+import audit
 from inventory import ledger
 from inventory.models import StockMovement
 from realtime.events import broadcast
@@ -196,6 +197,10 @@ class SaleViewSet(ShopScopedMixin, viewsets.ModelViewSet):
         instance.payments.update(is_deleted=True)
         instance.is_deleted = True
         instance.save(update_fields=['is_deleted', 'updated_at'])
+        audit.record('sale.deleted', shop=instance.shop, user=self.request.user, target=instance,
+                     summary=f'Deleted sale #{instance.invoice_number} ({instance.total}) by {instance.staff_name or "unknown"}',
+                     reason=str(self.request.data.get('reason') or '') if hasattr(self.request, 'data') else '',
+                     data={'total': str(instance.total), 'amount_paid': str(instance.amount_paid)})
         broadcast(instance.shop, 'sale.deleted', {'id': str(instance.id)})
 
     @action(detail=True, methods=['post'], url_path='add-payment')
@@ -290,6 +295,10 @@ class SaleViewSet(ShopScopedMixin, viewsets.ModelViewSet):
 
         new_total = sale.total
         balance = new_total - old_total  # positive = customer owes more, negative = refund due
+        audit.record('sale.item_replaced', shop=sale.shop, user=request.user, target=sale,
+                     summary=f'Changed an item on sale #{sale.invoice_number}: total {old_total} -> {new_total}',
+                     data={'sale_item': str(sale_item.id), 'new_item_name': data['item_name'],
+                           'old_total': str(old_total), 'new_total': str(new_total)})
 
         return Response({
             'sale': SaleSerializer(sale).data,

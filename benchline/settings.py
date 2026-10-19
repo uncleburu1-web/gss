@@ -43,6 +43,7 @@ INSTALLED_APPS = [
     'subscriptions',
     'sync',
     'shifts',
+    'audit',
     'customers',
     'realtime',
     'branches',
@@ -55,6 +56,8 @@ MIDDLEWARE = [
     'django.middleware.common.CommonMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
     'django.contrib.auth.middleware.AuthenticationMiddleware',
+    # After auth: refuses cloud API calls once the subscription has ended (subscriptions/gate.py).
+    'subscriptions.gate.SubscriptionGateMiddleware',
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
 ]
