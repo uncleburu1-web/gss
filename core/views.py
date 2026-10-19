@@ -406,7 +406,9 @@ class DashboardStatsView(APIView):
             shop__in=shops, quantity_remaining__gt=0, expiry_date__isnull=False,
             expiry_date__lte=today + timedelta(days=30), is_deleted=False,
         ).count()
-        todays_sales = Sale.objects.filter(shop__in=shops, date__date=today, is_deleted=False)
+        from sales.visibility import visible_sales
+        # A seller's dashboard shows their own takings; the owner's shows everyone's.
+        todays_sales = visible_sales(Sale.objects.filter(shop__in=shops, date__date=today, is_deleted=False), request.user)
         today_revenue = sum(s.total for s in todays_sales)
         today_profit = sum(s.profit for s in todays_sales)
 
@@ -465,7 +467,9 @@ class RecentActivityView(APIView):
                 'timestamp': p.date,
             })
 
-        for s in Sale.objects.filter(shop__in=shops, is_deleted=False).prefetch_related('items').order_by('-date')[:10]:
+        from sales.visibility import visible_sales
+        own_or_all = visible_sales(Sale.objects.filter(shop__in=shops, is_deleted=False), request.user)
+        for s in own_or_all.prefetch_related('items').order_by('-date')[:10]:
             first_item = s.items.first()
             label = first_item.item_name if first_item else 'items'
             extra = s.items.count() - 1

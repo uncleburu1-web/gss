@@ -14,6 +14,7 @@ from inventory.models import StockMovement
 from realtime.events import broadcast
 from .models import Sale, SaleItem, SaleAllocation, next_invoice_number
 from .payments import recompute_paid, record_payment
+from .visibility import visible_sales
 from .serializers import SaleSerializer, AddPaymentSerializer, ReplaceSaleItemSerializer
 
 
@@ -116,6 +117,11 @@ class SaleViewSet(ShopScopedMixin, viewsets.ModelViewSet):
     filterset_fields = ['payment_method', 'status']
     search_fields = ['items__item_name', 'customer_name', 'staff_name']
     ordering_fields = ['date']
+
+    def get_queryset(self):
+        # Sellers see only their own sales; owners/managers/CEO and roles granted view_all_sales
+        # see everyone's (sales.visibility).
+        return visible_sales(super().get_queryset(), self.request.user)
 
     def get_permissions(self):
         # Everyone who can reach this viewset at all (any authenticated

@@ -200,6 +200,9 @@ def _apply_sale(shop, entity_id, operation, payload, ctx=None):
             defaults['date'] = sale_date
         if payload.get('shift_id'):
             defaults['shift_ref'] = _uuid_or_none(payload.get('shift_id'))
+        worker = getattr((ctx or {}).get('user'), 'worker', None)
+        if worker is not None:
+            defaults['worker'] = worker  # the signed-in seller who pushed it rang it up
     # The till's printed receipt number. Only written when sent, so an update from an older client that
     # doesn't know about it can never blank one that is already there; trimmed rather than rejected.
     receipt_no = payload.get('receipt_no')
@@ -872,6 +875,8 @@ def _serialize_sale(o):
     return {
         'id': str(o.id), 'customer_id': str(o.customer_id) if o.customer_id else None,
         'customer_name': o.customer_name, 'staff_name': o.staff_name,
+        # Who rang it up, so a till can show sellers only their own sales and print per-seller reports.
+        'seller_username': o.worker.user.username if o.worker_id and o.worker.user_id else None,
         'payment_method': o.payment_method, 'status': o.status,
         'amount_paid': str(o.amount_paid), 'invoice_number': o.invoice_number,
         'receipt_no': o.receipt_no or None, 'date': o.date.isoformat(),
@@ -971,7 +976,7 @@ class SyncPullView(APIView):
             model, serialize = self.serializers[entity_type]
             qs = model.objects.filter(shop=shop)
             if model is Sale:
-                qs = qs.prefetch_related('payments')
+                qs = qs.prefetch_related('payments').select_related('worker__user')
             if model is StockMovement:
                 qs = qs.filter(kind__in=TILL_APPLIED_MOVEMENT_KINDS)
             if since:
