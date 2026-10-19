@@ -1,5 +1,8 @@
+from django.db import transaction
 from rest_framework import serializers
-from .models import InventoryItem, ItemVariant, StockBatch
+
+from . import ledger
+from .models import InventoryItem, ItemVariant, StockBatch, StockMovement
 
 
 class ItemVariantSerializer(serializers.ModelSerializer):
@@ -65,10 +68,19 @@ class StockBatchSerializer(serializers.ModelSerializer):
             return obj.supplier.name
         return obj.supplier_name or None
 
+    def _ledger_user(self):
+        request = self.context.get('request')
+        return getattr(request, 'user', None)
+
+    @transaction.atomic
     def create(self, validated_data):
         validated_data['quantity_remaining'] = validated_data['quantity_received']
-        return super().create(validated_data)
+        batch = super().create(validated_data)
+        ledger.record(batch.shop, batch, batch.quantity_remaining, StockMovement.RECEIPT,
+                      user=self._ledger_user(), reference=('stock_batch', batch.id))
+        return batch
 
+    @transaction.atomic
     def update(self, instance, validated_data):
         new_received = validated_data.get('quantity_received', instance.quantity_received)
         if new_received != instance.quantity_received:
@@ -83,6 +95,10 @@ class StockBatchSerializer(serializers.ModelSerializer):
                     )
                 })
             instance.quantity_remaining = new_remaining
+            batch = super().update(instance, validated_data)
+            ledger.record(batch.shop, batch, delta, StockMovement.RECEIPT, user=self._ledger_user(),
+                          reason='Received quantity corrected', reference=('stock_batch', batch.id))
+            return batch
         return super().update(instance, validated_data)
 
 
@@ -157,3 +173,43 @@ class InventoryItemDetailSerializer(InventoryItemSerializer):
     class Meta(InventoryItemSerializer.Meta):
         fields = InventoryItemSerializer.Meta.fields + ['batches', 'variants']
 
+
+
+class DamageSerializer(serializers.Serializer):
+    quantity = serializers.DecimalField(max_digits=12, decimal_places=3, min_value=0)
+    reason = serializers.CharField(max_length=255, allow_blank=True)
+    variant = serializers.UUIDField(required=False, allow_null=True)
+
+    def validate_reason(self, value):
+        if not value.strip():
+            raise serializers.ValidationError('A reason is required.')
+        return value.strip()
+
+
+class StockCountSerializer(serializers.Serializer):
+    counted_quantity = serializers.DecimalField(max_digits=12, decimal_places=3, min_value=0)
+    reason = serializers.CharField(max_length=255, allow_blank=True)
+    variant = serializers.UUIDField(required=False, allow_null=True)
+
+    def validate_reason(self, value):
+        if not value.strip():
+            raise serializers.ValidationError('A reason is required.')
+        return value.strip()
+
+
+class StockMovementSerializer(serializers.ModelSerializer):
+    item_name = serializers.CharField(source='item.name', read_only=True)
+    variant_label = serializers.SerializerMethodField()
+    kind_label = serializers.CharField(source='get_kind_display', read_only=True)
+
+    class Meta:
+        model = StockMovement
+        fields = [
+            'id', 'item', 'item_name', 'variant', 'variant_label', 'batch', 'kind', 'kind_label', 'quantity',
+            'system_quantity', 'counted_quantity', 'reason', 'actor_name', 'source', 'reference_type',
+            'reference_id', 'created_at',
+        ]
+        read_only_fields = fields
+
+    def get_variant_label(self, obj):
+        return obj.variant.label if obj.variant_id else ''

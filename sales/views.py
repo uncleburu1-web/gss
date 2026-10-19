@@ -8,13 +8,21 @@ from django_filters.rest_framework import DjangoFilterBackend
 from core.idempotency import run_idempotent
 from core.mixins import ShopScopedMixin
 from core.permissions import HasCapability
+from inventory import ledger
+from inventory.models import StockMovement
 from realtime.events import broadcast
 from .models import Sale, SaleItem, SaleAllocation, next_invoice_number
 from .payments import recompute_paid, record_payment
 from .serializers import SaleSerializer, AddPaymentSerializer, ReplaceSaleItemSerializer
 
 
-def _allocate_stock(sale_item, shop):
+def _sale_actor(sale_item):
+    sale = sale_item.sale
+    worker = getattr(sale, 'worker', None)
+    return (getattr(worker, 'user', None), sale.staff_name or getattr(worker, 'full_name', '') or '')
+
+
+def _allocate_stock(sale_item, shop, source='web'):
     """FEFO stock deduction for one cart line — same logic the old
     single-item Sale used, just scoped to a SaleItem now instead of the
     whole sale.
@@ -52,6 +60,9 @@ def _allocate_stock(sale_item, shop):
         batch.quantity_remaining -= take
         batch.save(update_fields=['quantity_remaining'])
         SaleAllocation.objects.create(sale_item=sale_item, batch=batch, quantity=take, shop=shop)
+        user, actor = _sale_actor(sale_item)
+        ledger.record(shop, batch, -take, StockMovement.SALE, item=item, user=user, actor_name=actor,
+                      reference=('sale_item', sale_item.id), source=source)
         total_cost += take * batch.cost_price
         total_taken += take
         remaining_to_take -= take
@@ -87,11 +98,13 @@ def _allocate_stock(sale_item, shop):
         })
 
 
-def _restore_stock(sale_item):
+def _restore_stock(sale_item, source='web', user=None):
     for alloc in sale_item.allocations.select_related('batch').all():
         if alloc.batch is not None:
             alloc.batch.quantity_remaining += alloc.quantity
             alloc.batch.save(update_fields=['quantity_remaining'])
+            ledger.record(alloc.batch.shop, alloc.batch, alloc.quantity, StockMovement.SALE_REVERSAL,
+                          item=alloc.batch.item, user=user, reference=('sale_item', sale_item.id), source=source)
     sale_item.allocations.all().delete()
 
 
@@ -177,7 +190,7 @@ class SaleViewSet(ShopScopedMixin, viewsets.ModelViewSet):
             # to see independently — restoring stock and clearing them here
             # (see _restore_stock) is enough; only the SaleItem and Sale
             # rows themselves need the soft-delete tombstone.
-            _restore_stock(sale_item)
+            _restore_stock(sale_item, user=self.request.user)
             sale_item.is_deleted = True
             sale_item.save(update_fields=['is_deleted', 'updated_at'])
         instance.payments.update(is_deleted=True)
@@ -239,7 +252,7 @@ class SaleViewSet(ShopScopedMixin, viewsets.ModelViewSet):
 
         old_total = sale.total
 
-        _restore_stock(sale_item)
+        _restore_stock(sale_item, user=request.user)
 
         new_item = data.get('item')
         new_variant = data.get('variant')

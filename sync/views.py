@@ -15,6 +15,7 @@ import json
 import uuid
 from datetime import timedelta, timezone as dt_timezone
 
+from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db import IntegrityError, transaction
 from django.db.models import Q
 from rest_framework.exceptions import APIException, PermissionDenied, ValidationError
@@ -29,7 +30,8 @@ from core.capabilities import has_capability
 from core.utils import get_shop_for_user, user_may_use_branch_device
 from customers.models import Customer
 from devices.models import Device
-from inventory.models import InventoryItem, StockBatch
+from inventory import ledger
+from inventory.models import InventoryItem, StockBatch, StockMovement
 from realtime.events import broadcast
 from sales.models import Sale, SaleItem, next_invoice_number
 from shifts.models import CashMovement, Shift
@@ -129,7 +131,15 @@ def _apply_stock_batch(shop, entity_id, operation, payload, ctx=None):
         'selling_price': selling_price,
         'expiry_date': payload.get('expiry_date') or None,
     }
-    StockBatch.objects.update_or_create(id=entity_id, shop=shop, defaults=defaults)
+    before = StockBatch.objects.filter(id=entity_id, shop=shop).values_list('quantity_remaining', flat=True).first()
+    batch, created = StockBatch.objects.update_or_create(id=entity_id, shop=shop, defaults=defaults)
+    user = (ctx or {}).get('user')
+    if created:
+        ledger.record(shop, batch, batch.quantity_remaining, StockMovement.RECEIPT, user=user, source='till',
+                      reference=('stock_batch', batch.id))
+    elif before is not None and batch.quantity_remaining != before:
+        ledger.record(shop, batch, batch.quantity_remaining - before, StockMovement.ADJUSTMENT, user=user,
+                      source='till', reason='Batch edited on a till', reference=('stock_batch', batch.id))
 
 
 def _apply_customer(shop, entity_id, operation, payload, ctx=None):
@@ -155,7 +165,7 @@ def _apply_sale(shop, entity_id, operation, payload, ctx=None):
         except Sale.DoesNotExist:
             return  # never arrived and now it's deleted too — nothing to do
         for sale_item in sale.items.all():
-            _restore_stock(sale_item)
+            _restore_stock(sale_item, source='till', user=(ctx or {}).get('user'))
             sale_item.is_deleted = True
             sale_item.save(update_fields=['is_deleted', 'updated_at'])
         sale.payments.update(is_deleted=True)
@@ -244,7 +254,7 @@ def _apply_sale_item(shop, entity_id, operation, payload, ctx=None):
         # function the normal REST create-sale endpoint uses, so cost/
         # profit numbers here match what they'd be had this sale happened
         # online in the first place.
-        _allocate_stock(sale_item, shop)
+        _allocate_stock(sale_item, shop, source='till')
 
     if sale.status == 'completed':
         apply_legacy_amount_paid(sale, sale.total)
@@ -345,7 +355,7 @@ def _apply_sale_doc(shop, entity_id, operation, payload, ctx=None):
             discount=line.get('discount') or 0,
         )
         if item is not None:
-            _allocate_stock(sale_item, shop)  # the cloud's own FEFO, as for every other sale
+            _allocate_stock(sale_item, shop, source='till')  # the cloud's own FEFO, as for every other sale
 
     for p in payments:
         if not isinstance(p, dict) or not p.get('id'):
@@ -459,10 +469,56 @@ def _apply_cash_movement(shop, entity_id, operation, payload, ctx=None):
     )
 
 
+def _apply_stock_movement(shop, entity_id, operation, payload, ctx=None):
+    """Damage or a stock count recorded on a till (protocol 4).
+
+    entity_id is the till's document id; every movement it produces here carries it as
+    client_ref, which is how a repeat is recognised and how the till knows, on its next pull,
+    that these rows are its own and already applied locally.
+
+      damage:     {kind, product_id, variant_id?, quantity, reason, created_at, actor}
+      adjustment: {kind, product_id, variant_id?, counted_quantity, reason, created_at, actor}
+
+    Damage: any worker, reason required. The till already took the goods out of its own stock,
+    so if other tills have meanwhile sold some of them, the cloud writes off what it still has
+    rather than refusing (the goods are gone either way). A stock count: owners only.
+    """
+    ctx = ctx or {}
+    if operation != 'create':
+        raise ValueError('A stock movement can only be created.')
+    if StockMovement.objects.filter(shop=shop, client_ref=entity_id).exists():
+        return
+    try:
+        item = InventoryItem.objects.select_for_update().get(id=payload.get('product_id'), shop=shop)
+    except (InventoryItem.DoesNotExist, ValueError, DjangoValidationError):
+        raise _Skip()  # the product has not arrived yet
+    variant = None
+    if payload.get('variant_id'):
+        variant = item.variants.filter(id=payload['variant_id']).first()
+    user = ctx.get('user')
+    common = dict(variant=variant, user=user, source='till', client_ref=entity_id,
+                  at=_parse_dt(payload.get('created_at')), actor_name=(payload.get('actor') or None))
+    kind = payload.get('kind')
+    if kind == 'damage':
+        available = ledger.on_hand(item, variant)
+        wanted = ledger._whole(payload.get('quantity') or 0, 'Quantity')
+        quantity = min(wanted, available)
+        if quantity <= 0:
+            return  # nothing left on the cloud's side to write off
+        ledger.record_damage(shop, item, quantity, payload.get('reason') or '', **common)
+    elif kind == 'adjustment':
+        if not is_owner(user):
+            raise ValueError('Only an owner can adjust stock after a count.')
+        ledger.record_stock_count(shop, item, payload.get('counted_quantity'), payload.get('reason') or '', **common)
+    else:
+        raise ValueError('Unknown stock movement kind.')
+
+
 # What this cloud understands. Sent with every pull so a till only switches to newer operation
 # types once the cloud it talks to can apply them.
 #   2: sale_doc, sale_payment          3: shift, cash_movement
-SYNC_PROTOCOL = 3
+#   4: stock_movement (damage, stock count) both ways
+SYNC_PROTOCOL = 4
 
 _HANDLERS = {
     'product': _apply_product,
@@ -474,6 +530,7 @@ _HANDLERS = {
     'sale_payment': _apply_sale_payment,
     'shift': _apply_shift,
     'cash_movement': _apply_cash_movement,
+    'stock_movement': _apply_stock_movement,
 }
 
 # Same events a REST create/update/delete on the equivalent resource would
@@ -486,7 +543,7 @@ _EVENT_ENTITY = {
     'product': 'inventoryitem', 'stock_batch': 'stockbatch',
     'customer': 'customer', 'sale': 'sale', 'sale_item': 'saleitem',
     'sale_doc': 'sale', 'sale_payment': 'sale',
-    'shift': 'shift', 'cash_movement': 'cashmovement',
+    'shift': 'shift', 'cash_movement': 'cashmovement', 'stock_movement': 'stockmovement',
 }
 _EVENT_VERB = {'create': 'created', 'update': 'updated', 'delete': 'deleted'}
 
@@ -763,6 +820,28 @@ def _serialize_stock_batch(o):
     }
 
 
+# Movements a till applies to its own stock when it pulls them. Sales, reversals, receipts and
+# opening balances are left out: the till already derives those from the sales and batches it
+# pulls, so applying them again would count them twice.
+TILL_APPLIED_MOVEMENT_KINDS = (
+    StockMovement.DAMAGE, StockMovement.ADJUSTMENT, StockMovement.REPAIR_PART,
+    StockMovement.REPAIR_PART_RETURN, StockMovement.RETURN, StockMovement.TRANSFER,
+)
+
+
+def _serialize_stock_movement(o):
+    return {
+        'id': str(o.id), 'kind': o.kind, 'product_id': str(o.item_id),
+        'variant_id': str(o.variant_id) if o.variant_id else None,
+        'batch_id': str(o.batch_id) if o.batch_id else None,
+        'quantity': str(o.quantity), 'reason': o.reason, 'actor_name': o.actor_name,
+        'system_quantity': str(o.system_quantity) if o.system_quantity is not None else None,
+        'counted_quantity': str(o.counted_quantity) if o.counted_quantity is not None else None,
+        'client_ref': str(o.client_ref) if o.client_ref else None,
+        'source': o.source, 'created_at': o.created_at.isoformat(),
+    }
+
+
 def _serialize_customer(o):
     return {
         'id': str(o.id), 'name': o.name, 'phone': o.phone,
@@ -840,6 +919,8 @@ class SyncPullView(APIView):
         'customer': (Customer, _serialize_customer),
         'sale': (Sale, _serialize_sale),
         'sale_item': (SaleItem, _serialize_sale_item),
+        # After stock_batch, so a till always has the batch before a movement that names it.
+        'stock_movement': (StockMovement, _serialize_stock_movement),
     }
 
     def get(self, request):
@@ -872,6 +953,8 @@ class SyncPullView(APIView):
             qs = model.objects.filter(shop=shop)
             if model is Sale:
                 qs = qs.prefetch_related('payments')
+            if model is StockMovement:
+                qs = qs.filter(kind__in=TILL_APPLIED_MOVEMENT_KINDS)
             if since:
                 qs = qs.filter(updated_at__gt=since)
             if index == start_type and cursor_at is not None:

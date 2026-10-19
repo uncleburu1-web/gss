@@ -1,16 +1,22 @@
+from django.db import transaction
+from django.db.models import Q
 from rest_framework import viewsets, filters
 from rest_framework.decorators import action
+from rest_framework.permissions import IsAuthenticated
 from rest_framework.parsers import FormParser, JSONParser, MultiPartParser
 from rest_framework.response import Response
 from django_filters.rest_framework import DjangoFilterBackend
 
-from core.permissions import IsOwnerOrReadOnly
+from core.capabilities import has_capability
+from core.permissions import IsOwnerOrReadOnly, is_owner
 from core.mixins import ShopScopedMixin
 from realtime.events import broadcast
 from .cloudinary_utils import InvalidProductImage, delete_product_image, upload_product_image, validate_product_image
-from .models import InventoryItem, ItemVariant, StockBatch
+from . import ledger
+from .models import InventoryItem, ItemVariant, StockBatch, StockMovement
 from .serializers import (
-    InventoryItemSerializer, InventoryItemDetailSerializer, ItemVariantSerializer, StockBatchSerializer,
+    DamageSerializer, InventoryItemSerializer, InventoryItemDetailSerializer, ItemVariantSerializer,
+    StockBatchSerializer, StockCountSerializer, StockMovementSerializer,
 )
 
 
@@ -53,11 +59,74 @@ class InventoryItemViewSet(ShopScopedMixin, viewsets.ModelViewSet):
             return Response(StockBatchSerializer(qs, many=True).data)
 
         data = {**request.data, 'item': item.id}
-        serializer = StockBatchSerializer(data=data)
+        serializer = StockBatchSerializer(data=data, context={'request': request})
         serializer.is_valid(raise_exception=True)
         serializer.save(shop=self.get_current_shop())
         item.refresh_from_db()
         return Response(InventoryItemDetailSerializer(item).data, status=201)
+
+    def _variant_for(self, item, variant_id):
+        if not variant_id:
+            if item.has_variants:
+                raise ledger.LedgerError('This item has sizes/colours — say which one.')
+            return None
+        variant = item.variants.filter(id=variant_id, is_deleted=False).first()
+        if variant is None:
+            raise ledger.LedgerError('That variant does not belong to this item.')
+        return variant
+
+    def _after_stock_change(self, item, movements):
+        broadcast(item.shop, 'inventoryitem.updated', {'id': str(item.pk)})
+        broadcast(item.shop, 'stockmovement.created', {'id': str(movements[0].id) if movements else None,
+                                                       'count': len(movements)})
+
+    @action(detail=True, methods=['post'], url_path='damage', permission_classes=[IsAuthenticated])
+    def damage(self, request, pk=None):
+        """POST {quantity, reason, variant?} — write off damaged/expired/lost stock.
+
+        Any worker may record damage (it is something a seller sees first), but never without a
+        reason, and never more than is in stock. Who and when are recorded on the movement."""
+        item = self.get_object()
+        serializer = DamageSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+        try:
+            with transaction.atomic():
+                InventoryItem.objects.select_for_update().filter(pk=item.pk).first()
+                movements = ledger.record_damage(
+                    item.shop, item, data['quantity'], data['reason'],
+                    variant=self._variant_for(item, data.get('variant')), user=request.user, source='web',
+                )
+        except ledger.LedgerError as exc:
+            return Response({'detail': str(exc)}, status=400)
+        self._after_stock_change(item, movements)
+        item.refresh_from_db()
+        return Response(InventoryItemDetailSerializer(item).data, status=201)
+
+    @action(detail=True, methods=['post'], url_path='stock-count', permission_classes=[IsAuthenticated])
+    def stock_count(self, request, pk=None):
+        """POST {counted_quantity, reason, variant?} — set stock to what was physically counted.
+
+        Owners only (owner, branch manager, CEO). Records the system and counted figures."""
+        if not is_owner(request.user):
+            return Response({'detail': 'Only an owner can adjust stock after a count.'}, status=403)
+        item = self.get_object()
+        serializer = StockCountSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+        try:
+            with transaction.atomic():
+                InventoryItem.objects.select_for_update().filter(pk=item.pk).first()
+                movements = ledger.record_stock_count(
+                    item.shop, item, data['counted_quantity'], data['reason'],
+                    variant=self._variant_for(item, data.get('variant')), user=request.user, source='web',
+                )
+        except ledger.LedgerError as exc:
+            return Response({'detail': str(exc)}, status=400)
+        if movements:
+            self._after_stock_change(item, movements)
+        item.refresh_from_db()
+        return Response(InventoryItemDetailSerializer(item).data, status=201 if movements else 200)
 
     @action(
         detail=True, methods=['post', 'delete'], url_path='image',
@@ -146,3 +215,35 @@ class StockBatchViewSet(ShopScopedMixin, viewsets.ModelViewSet):
     filter_backends = [DjangoFilterBackend, filters.OrderingFilter]
     filterset_fields = ['item', 'variant']
     ordering_fields = ['expiry_date', 'received_date']
+
+    @transaction.atomic
+    def perform_destroy(self, instance):
+        # Deleting a batch takes whatever was left in it out of stock; the ledger says so.
+        if instance.quantity_remaining:
+            ledger.record(instance.shop, instance, -instance.quantity_remaining, StockMovement.ADJUSTMENT,
+                          user=self.request.user, reason='Batch deleted', reference=('stock_batch', instance.id))
+        super().perform_destroy(instance)
+
+
+class StockMovementViewSet(viewsets.ReadOnlyModelViewSet):
+    """GET /api/inventory/movements/?item=&kind=&date_from=&date_to= — the stock ledger.
+
+    Owners, managers, the CEO and roles granted view_all_sales see every movement; anyone else
+    sees the movements they made themselves."""
+    serializer_class = StockMovementSerializer
+    permission_classes = [IsAuthenticated]
+    filter_backends = [DjangoFilterBackend]
+    filterset_fields = ['item', 'kind', 'variant', 'batch']
+
+    def get_queryset(self):
+        from core.utils import get_shops_for_user
+        shops = get_shops_for_user(self.request.user, branch_id=self.request.headers.get('X-Branch-ID') or None)
+        qs = StockMovement.objects.filter(shop__in=shops).select_related('item', 'variant')
+        if not has_capability(self.request.user, 'view_all_sales'):
+            qs = qs.filter(Q(user=self.request.user))
+        params = self.request.query_params
+        if params.get('date_from'):
+            qs = qs.filter(created_at__date__gte=params['date_from'])
+        if params.get('date_to'):
+            qs = qs.filter(created_at__date__lte=params['date_to'])
+        return qs.order_by('-created_at')

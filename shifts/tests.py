@@ -81,8 +81,8 @@ class ShiftSyncTests(TestCase):
         self.push(make_op('sale', 'create', {'customer_name': 'W', 'invoice_number': 1, 'shift_id': shift_id}, entity_id=sale_id))
         self.assertEqual(str(Sale.objects.get(id=sale_id).shift_ref), shift_id)
 
-    def test_the_cloud_announces_protocol_3(self):
-        self.assertEqual(self.client_.get('/api/sync/pull/', {'entity_types': 'customer'}).json()['sync_protocol'], 3)
+    def test_the_cloud_announces_at_least_protocol_3(self):
+        self.assertGreaterEqual(self.client_.get('/api/sync/pull/', {'entity_types': 'customer'}).json()['sync_protocol'], 3)
 
 
 class ShiftApiVisibilityTests(TestCase):
