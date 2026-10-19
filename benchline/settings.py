@@ -200,7 +200,13 @@ CORS_ALLOW_CREDENTIALS = True
 # error with no response (no status code, no body), which is exactly what
 # produced Signup.jsx's generic "Could not create your account" fallback
 # and could equally well have broken a branch user's login the same way.
-CORS_ALLOW_HEADERS = list(default_headers) + ['x-branch-id']
+# idempotency-key: web/Android send it on every Charge and add-payment so a retried request is
+# never counted twice (core.idempotency). x-device-id: desktop tills send it on sync (not a
+# browser, but harmless to allow). Missing either here makes the BROWSER refuse the request
+# outright at the preflight, before it ever reaches Django.
+CORS_ALLOW_HEADERS = list(default_headers) + ['x-branch-id', 'idempotency-key', 'x-device-id']
+# Lets the web app read whether a response was a replay of an earlier identical request.
+CORS_EXPOSE_HEADERS = ['idempotent-replay']
 
 # ---------------------------------------------------------------------------
 # Paystack — subscription billing (SaaS). Keys come from the environment
