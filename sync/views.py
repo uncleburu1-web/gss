@@ -16,6 +16,7 @@ import uuid
 from datetime import timedelta, timezone as dt_timezone
 
 from django.db import IntegrityError, transaction
+from django.db.models import Q
 from rest_framework.exceptions import APIException, PermissionDenied, ValidationError
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
@@ -534,6 +535,7 @@ class SyncPushView(APIView):
         shop, device = resolve_sync_scope(request)
         operations = request.data.get('operations') or []
         results = []
+        events = {}  # event name -> ids changed, broadcast once per name after the loop
 
         for op in operations:
             op_id = op.get('id')
@@ -625,12 +627,23 @@ class SyncPushView(APIView):
                 continue
 
             if entity_type == 'sale_payment':
-                event, event_payload = 'sale.updated', {'id': str(payload.get('sale_id'))}
+                event, changed_id = 'sale.updated', str(payload.get('sale_id'))
             else:
                 event = f'{_EVENT_ENTITY.get(entity_type, entity_type)}.{_EVENT_VERB.get(operation, operation)}'
-                event_payload = {'id': entity_id}
-            broadcast(shop, event, event_payload)
+                changed_id = str(entity_id)
+            events.setdefault(event, [])
+            if changed_id not in events[event]:
+                events[event].append(changed_id)
             results.append({'id': op_id, 'status': 'applied'})
+
+        # ONE realtime event per kind of change in this batch, not one per operation (G9): 500
+        # queued sales used to mean ~1,500 Shop-row locks, event rows and socket messages, each
+        # making every other till pull again. Same event names as before (the web app reacts to
+        # the name, then refetches), so every client keeps working; `ids` lists what changed.
+        for event, ids in events.items():
+            broadcast(shop, event, {'id': ids[0], 'ids': ids[:200], 'count': len(ids)})
+        if device is not None and any(r['status'] in ('applied', 'already_applied') for r in results):
+            Device.objects.filter(id=device.id).update(last_sync_at=timezone.now())
 
         return Response({'results': results})
 
@@ -701,6 +714,27 @@ def _serialize_sale_item(o):
 PULL_CURSOR_OVERLAP = timedelta(minutes=2)
 
 
+def _parse_pull_cursor(raw, entity_types):
+    """'<type index>|<updated_at iso>|<id>' -> (index, updated_at|None, id|None). Bad input = start."""
+    if not raw:
+        return 0, None, None
+    try:
+        index_s, at_s, id_s = raw.split('|', 2)
+        index = int(index_s)
+    except ValueError:
+        return 0, None, None
+    if not 0 <= index < max(len(entity_types), 1):
+        return 0, None, None
+    if not at_s:
+        return index, None, None
+    at = parse_datetime(at_s)
+    try:
+        row_id = uuid.UUID(id_s)
+    except ValueError:
+        return index, None, None
+    return (index, at, row_id) if at else (index, None, None)
+
+
 class SyncPullView(APIView):
     """GET /api/sync/pull/?since=<ISO8601>&entity_types=product,stock_batch
 
@@ -728,20 +762,42 @@ class SyncPullView(APIView):
         since_param = request.query_params.get('since')
         since = parse_datetime(since_param) if since_param else None
         requested = request.query_params.get('entity_types')
-        entity_types = requested.split(',') if requested else list(self.serializers)
+        entity_types = [t for t in (requested.split(',') if requested else list(self.serializers)) if t in self.serializers]
+
+        # Paging (G11). Without `limit` (older tills) everything changed since `since` comes back
+        # in one response, exactly as before. With `limit`, rows come back in a stable order
+        # (entity types in parent-before-child order, then updated_at, then id) and `next_cursor`
+        # says where the next page starts; the till keeps asking until has_more is false.
+        try:
+            limit = max(1, min(int(request.query_params.get('limit')), 2000)) if request.query_params.get('limit') else None
+        except ValueError:
+            limit = None
+        start_type, cursor_at, cursor_id = _parse_pull_cursor(request.query_params.get('cursor'), entity_types)
 
         operations = []
-        for entity_type in entity_types:
-            spec = self.serializers.get(entity_type)
-            if spec is None:
+        has_more = False
+        next_cursor = None
+        for index, entity_type in enumerate(entity_types):
+            if index < start_type:
                 continue
-            model, serialize = spec
+            model, serialize = self.serializers[entity_type]
             qs = model.objects.filter(shop=shop)
             if model is Sale:
                 qs = qs.prefetch_related('payments')
             if since:
                 qs = qs.filter(updated_at__gt=since)
-            for obj in qs:
+            if index == start_type and cursor_at is not None:
+                qs = qs.filter(Q(updated_at__gt=cursor_at) | Q(updated_at=cursor_at, id__gt=cursor_id))
+            qs = qs.order_by('updated_at', 'id')
+            if limit is not None:
+                room = limit - len(operations)
+                rows = list(qs[:room + 1])
+                if len(rows) > room:
+                    rows = rows[:room]
+                    has_more = True
+            else:
+                rows = qs
+            for obj in rows:
                 operations.append({
                     'entity_type': entity_type,
                     'entity_id': str(obj.id),
@@ -749,8 +805,19 @@ class SyncPullView(APIView):
                     'payload': serialize(obj),
                     'updated_at': obj.updated_at.isoformat(),
                 })
+            if has_more:
+                last = rows[-1] if rows else None
+                next_cursor = f'{index}|{last.updated_at.isoformat()}|{last.id}' if last else f'{index}||'
+                break
+            if limit is not None and len(operations) >= limit and index + 1 < len(entity_types):
+                # This page is full exactly at a type boundary: the next page starts at the next type.
+                has_more = True
+                next_cursor = f'{index + 1}||'
+                break
 
         return Response({
+            'has_more': has_more,
+            'next_cursor': next_cursor,
             'operations': operations,
             'server_time': timezone.now().isoformat(),
             # The cursor to send as `since` next time (see PULL_CURSOR_OVERLAP).
