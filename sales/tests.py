@@ -64,7 +64,8 @@ class SaleDeletePermissionTests(TestCase):
         self.reception, _, _ = make_worker('reception1', 'reception', org=self.org, shop=self.shop)
 
     def _sale(self):
-        return Sale.objects.create(shop=self.shop, customer_name='Walk-in')
+        # The seller's own sale: sellers only ever see (and so can only act on) their own sales.
+        return Sale.objects.create(shop=self.shop, customer_name='Walk-in', worker=self.seller.worker)
 
     def test_seller_cannot_delete_sale_by_default(self):
         sale = self._sale()
@@ -153,7 +154,7 @@ class SaleEditPermissionTests(TestCase):
         RolePermission.objects.create(
             organization=self.org, role='seller', capability='edit_sale', allowed=True,
         )
-        sale = Sale.objects.create(shop=self.shop, customer_name='Walk-in')
+        sale = Sale.objects.create(shop=self.shop, customer_name='Walk-in', worker=self.seller.worker)
         client = APIClient()
         client.force_authenticate(user=self.seller)
         res = client.post(f'/api/sales/{sale.id}/replace-item/', {}, format='json')

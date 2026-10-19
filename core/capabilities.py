@@ -100,6 +100,16 @@ CAPABILITIES = {
         'default_roles': set(),
     },
 
+    'view_all_sales': {
+        'label': "See every seller's sales, shifts and day reports",
+        'description': (
+            'See and print the sales, cash movements and day reports of everyone at this branch. '
+            'Without it a person sees and prints only their own. An owner, branch manager or CEO '
+            'always has this.'
+        ),
+        'default_roles': set(),
+    },
+
     'view_financial_reports': {
         'label': 'View financial reports and Business Intelligence',
         'description': (

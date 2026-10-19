@@ -6,12 +6,13 @@ from rest_framework.response import Response
 from django_filters.rest_framework import DjangoFilterBackend
 
 from core.mixins import ShopScopedMixin
-from inventory.models import InventoryItem
+from inventory import ledger
+from inventory.models import InventoryItem, StockMovement
 from .models import RepairTicket, RepairPart
 from .serializers import RepairTicketSerializer, AddPaymentSerializer, AddPartSerializer, RepairPartSerializer
 
 
-def _allocate_part_stock(item, quantity, shop):
+def _allocate_part_stock(item, quantity, shop, user=None, reference=None):
     """FEFO stock deduction for one part taken onto a service ticket —
     same batch-walking logic as sales/views.py._allocate_stock, kept as
     its own copy here rather than a shared import because a repair part
@@ -31,6 +32,7 @@ def _allocate_part_stock(item, quantity, shop):
         take = min(batch.quantity_remaining, remaining_to_take)
         batch.quantity_remaining -= take
         batch.save(update_fields=['quantity_remaining'])
+        ledger.record(shop, batch, -take, StockMovement.REPAIR_PART, item=item, user=user, reference=reference)
         total_cost += take * batch.cost_price
         total_taken += take
         remaining_to_take -= take
@@ -42,7 +44,7 @@ def _allocate_part_stock(item, quantity, shop):
     return unit_cost
 
 
-def _restore_part_stock(part):
+def _restore_part_stock(part, user=None):
     """Undo _allocate_part_stock — puts the quantity back on the item's
     newest-expiry open batch (or oldest-received one if nothing has an
     expiry), which is close enough for a reversal: unlike a sale, a
@@ -52,6 +54,8 @@ def _restore_part_stock(part):
     if batch is not None:
         batch.quantity_remaining += part.quantity
         batch.save(update_fields=['quantity_remaining'])
+        ledger.record(batch.shop, batch, part.quantity, StockMovement.REPAIR_PART_RETURN, item=part.item, user=user,
+                      reference=('repair_part', part.id))
 
 
 class RepairTicketViewSet(ShopScopedMixin, viewsets.ModelViewSet):
@@ -91,7 +95,11 @@ class RepairTicketViewSet(ShopScopedMixin, viewsets.ModelViewSet):
             return Response({'item': 'Not found in this branch\'s inventory.'}, status=400)
 
         try:
-            unit_cost = _allocate_part_stock(item, data['quantity'], ticket.shop)
+            # Own savepoint: on a shortfall the batches already walked are put back, instead of
+            # the 400 response leaving a half-done deduction behind.
+            with transaction.atomic():
+                unit_cost = _allocate_part_stock(item, data['quantity'], ticket.shop, user=request.user,
+                                                 reference=('repair_ticket', ticket.id))
         except ValueError as exc:
             return Response({'quantity': str(exc)}, status=400)
 
@@ -110,7 +118,7 @@ class RepairTicketViewSet(ShopScopedMixin, viewsets.ModelViewSet):
         except RepairPart.DoesNotExist:
             return Response({'part': 'Not found on this ticket.'}, status=400)
 
-        _restore_part_stock(part)
+        _restore_part_stock(part, user=request.user)
         part.is_deleted = True
         part.save(update_fields=['is_deleted', 'updated_at'])
         return Response(RepairTicketSerializer(ticket).data)

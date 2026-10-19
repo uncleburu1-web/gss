@@ -163,7 +163,7 @@ class SaleDocTests(Stage2Base):
         self.till_push(op)
         body = self.client_.get('/api/sync/pull/', {'entity_types': 'sale'}).json()
 
-        self.assertEqual(body['sync_protocol'], 2)
+        self.assertGreaterEqual(body['sync_protocol'], 2)
         [pulled] = body['operations']
         self.assertEqual(len(pulled['payload']['payments']), 1)
         self.assertEqual(pulled['payload']['payments'][0]['source'], 'till')

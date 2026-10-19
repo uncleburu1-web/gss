@@ -21,6 +21,30 @@ class WorkerViewSet(ShopScopedMixin, viewsets.ModelViewSet):
     filterset_fields = ['role', 'is_active']
     search_fields = ['full_name', 'phone']
 
+    def perform_create(self, serializer):
+        super().perform_create(serializer)
+        w = serializer.instance
+        import audit
+        audit.record('staff.added', shop=w.shop, user=self.request.user, target=w,
+                     summary=f'Added {w.full_name} as {w.role}')
+
+    def perform_update(self, serializer):
+        before = {'role': serializer.instance.role, 'is_active': serializer.instance.is_active}
+        super().perform_update(serializer)
+        w = serializer.instance
+        after = {'role': w.role, 'is_active': w.is_active}
+        if after != before:
+            import audit
+            audit.record('staff.changed', shop=w.shop, user=self.request.user, target=w,
+                         summary=f'{w.full_name}: role {before["role"]} -> {w.role}, '
+                                 f'active {before["is_active"]} -> {w.is_active}', data={'before': before, 'after': after})
+
+    def perform_destroy(self, instance):
+        super().perform_destroy(instance)
+        import audit
+        audit.record('staff.removed', shop=instance.shop, user=self.request.user, target=instance,
+                     summary=f'Removed {instance.full_name} ({instance.role})')
+
 
 class AttendanceRecordViewSet(ShopScopedMixin, viewsets.ModelViewSet):
     """Attendance for this branch's workers.

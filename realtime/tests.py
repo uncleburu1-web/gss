@@ -5,6 +5,7 @@ architecture doc's test list as noted per class. Run with:
 
     python manage.py test realtime
 """
+import uuid
 import json
 
 from django.contrib.auth.models import User
@@ -231,3 +232,40 @@ class WebSocketConsumerTests(TransactionTestCase):
     async def _async_make_ceo(self, username, branch_names):
         from channels.db import database_sync_to_async
         return await database_sync_to_async(make_ceo)(username, branch_names)
+
+
+class SocketPresenceTests(TransactionTestCase):
+    """Stage 1b: a till's live socket is its heartbeat, so a till with a working connection sends
+    no HTTP heartbeats at all, and the cloud still knows it is there."""
+
+    async def _till_socket(self, user, device_id):
+        from benchline.asgi import application
+        communicator = WebsocketCommunicator(application, f'{_ws_path(user)}&device={device_id}')
+        connected, _ = await communicator.connect()
+        self.assertTrue(connected)
+        await communicator.receive_json_from()  # hello
+        return communicator
+
+    async def test_connecting_and_ponging_stamps_the_tills_presence(self):
+        from channels.db import database_sync_to_async
+        from devices.models import Device
+        user, shop = await database_sync_to_async(make_branch_worker)('presence')
+        device = await database_sync_to_async(Device.objects.create)(id=uuid.uuid4(), shop=shop, device_type='desktop')
+        communicator = await self._till_socket(user, device.id)
+        await communicator.send_json_to({'type': 'pong'})
+        await communicator.disconnect()
+        await database_sync_to_async(device.refresh_from_db)()
+        self.assertIsNotNone(device.last_ws_seen_at)
+        self.assertEqual(device.current_user_id, user.id)
+
+    async def test_a_till_from_another_shop_is_never_stamped(self):
+        from channels.db import database_sync_to_async
+        from devices.models import Device
+        user, _shop = await database_sync_to_async(make_branch_worker)('mine')
+        _other_user, other_shop = await database_sync_to_async(make_branch_worker)('theirs')
+        foreign = await database_sync_to_async(Device.objects.create)(id=uuid.uuid4(), shop=other_shop, device_type='desktop')
+        communicator = await self._till_socket(user, foreign.id)
+        await communicator.send_json_to({'type': 'pong'})
+        await communicator.disconnect()
+        await database_sync_to_async(foreign.refresh_from_db)()
+        self.assertIsNone(foreign.last_ws_seen_at)

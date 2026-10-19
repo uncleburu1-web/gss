@@ -15,7 +15,9 @@ import json
 import uuid
 from datetime import timedelta, timezone as dt_timezone
 
+from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db import IntegrityError, transaction
+from django.db.models import Q
 from rest_framework.exceptions import APIException, PermissionDenied, ValidationError
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
@@ -28,9 +30,12 @@ from core.capabilities import has_capability
 from core.utils import get_shop_for_user, user_may_use_branch_device
 from customers.models import Customer
 from devices.models import Device
-from inventory.models import InventoryItem, StockBatch
+import audit
+from inventory import ledger
+from inventory.models import InventoryItem, StockBatch, StockMovement
 from realtime.events import broadcast
 from sales.models import Sale, SaleItem, next_invoice_number
+from shifts.models import CashMovement, Shift
 from sales.payments import apply_legacy_amount_paid, record_payment, recompute_paid, serialize_payment
 from sales.views import _allocate_stock, _restore_stock
 
@@ -127,7 +132,15 @@ def _apply_stock_batch(shop, entity_id, operation, payload, ctx=None):
         'selling_price': selling_price,
         'expiry_date': payload.get('expiry_date') or None,
     }
-    StockBatch.objects.update_or_create(id=entity_id, shop=shop, defaults=defaults)
+    before = StockBatch.objects.filter(id=entity_id, shop=shop).values_list('quantity_remaining', flat=True).first()
+    batch, created = StockBatch.objects.update_or_create(id=entity_id, shop=shop, defaults=defaults)
+    user = (ctx or {}).get('user')
+    if created:
+        ledger.record(shop, batch, batch.quantity_remaining, StockMovement.RECEIPT, user=user, source='till',
+                      reference=('stock_batch', batch.id))
+    elif before is not None and batch.quantity_remaining != before:
+        ledger.record(shop, batch, batch.quantity_remaining - before, StockMovement.ADJUSTMENT, user=user,
+                      source='till', reason='Batch edited on a till', reference=('stock_batch', batch.id))
 
 
 def _apply_customer(shop, entity_id, operation, payload, ctx=None):
@@ -153,12 +166,15 @@ def _apply_sale(shop, entity_id, operation, payload, ctx=None):
         except Sale.DoesNotExist:
             return  # never arrived and now it's deleted too — nothing to do
         for sale_item in sale.items.all():
-            _restore_stock(sale_item)
+            _restore_stock(sale_item, source='till', user=(ctx or {}).get('user'))
             sale_item.is_deleted = True
             sale_item.save(update_fields=['is_deleted', 'updated_at'])
         sale.payments.update(is_deleted=True)
         sale.is_deleted = True
         sale.save(update_fields=['is_deleted', 'updated_at'])
+        audit.record('sale.deleted', shop=shop, user=(ctx or {}).get('user'), target=sale, source='till',
+                     device=(ctx or {}).get('device'),
+                     summary=f'Deleted sale #{sale.invoice_number} ({sale.total}) on a till')
         return
     if _is_repeat_create(Sale, shop, entity_id, operation):
         return  # a re-sent header must not reset a status or customer changed since
@@ -182,6 +198,11 @@ def _apply_sale(shop, entity_id, operation, payload, ctx=None):
         sale_date = _sale_date_from_payload(payload)
         if sale_date is not None:
             defaults['date'] = sale_date
+        if payload.get('shift_id'):
+            defaults['shift_ref'] = _uuid_or_none(payload.get('shift_id'))
+        worker = getattr((ctx or {}).get('user'), 'worker', None)
+        if worker is not None:
+            defaults['worker'] = worker  # the signed-in seller who pushed it rang it up
     # The till's printed receipt number. Only written when sent, so an update from an older client that
     # doesn't know about it can never blank one that is already there; trimmed rather than rejected.
     receipt_no = payload.get('receipt_no')
@@ -240,7 +261,7 @@ def _apply_sale_item(shop, entity_id, operation, payload, ctx=None):
         # function the normal REST create-sale endpoint uses, so cost/
         # profit numbers here match what they'd be had this sale happened
         # online in the first place.
-        _allocate_stock(sale_item, shop)
+        _allocate_stock(sale_item, shop, source='till')
 
     if sale.status == 'completed':
         apply_legacy_amount_paid(sale, sale.total)
@@ -316,6 +337,7 @@ def _apply_sale_doc(shop, entity_id, operation, payload, ctx=None):
     if creating:
         defaults['device'] = ctx.get('device')
         defaults['received_at'] = timezone.now()
+        defaults['shift_ref'] = _uuid_or_none(payload.get('shift_id'))
         worker = getattr(ctx.get('user'), 'worker', None)
         if worker is not None:
             defaults['worker'] = worker
@@ -340,7 +362,7 @@ def _apply_sale_doc(shop, entity_id, operation, payload, ctx=None):
             discount=line.get('discount') or 0,
         )
         if item is not None:
-            _allocate_stock(sale_item, shop)  # the cloud's own FEFO, as for every other sale
+            _allocate_stock(sale_item, shop, source='till')  # the cloud's own FEFO, as for every other sale
 
     for p in payments:
         if not isinstance(p, dict) or not p.get('id'):
@@ -374,9 +396,151 @@ def _apply_sale_payment(shop, entity_id, operation, payload, ctx=None):
     )
 
 
-# What this cloud understands. Sent with every pull so a till only switches to sale_doc and
-# sale_payment once the cloud it talks to can apply them.
-SYNC_PROTOCOL = 2
+def _parse_dt(value):
+    if not isinstance(value, str) or not value:
+        return None
+    parsed = parse_datetime(value)
+    if parsed is not None and timezone.is_naive(parsed):
+        parsed = timezone.make_aware(parsed, dt_timezone.utc)
+    return parsed
+
+
+def _shift_cashier(shop, username, ctx):
+    """The login behind a till's shift owner name, if it belongs to this branch (else None)."""
+    user = ctx.get('user')
+    if user is not None and username and user.get_username() == username:
+        return user
+    from staff.models import Worker
+    worker = Worker.objects.select_related('user').filter(shop=shop, user__username=username).first()
+    return worker.user if worker else None
+
+
+def _apply_shift(shop, entity_id, operation, payload, ctx=None):
+    """A till's cashier shift (stage 3), sent when it opens and again when it closes.
+
+    Upsert by the till's shift id, so a close that arrives first (a till that upgraded mid-shift)
+    still lands. Once the cloud has a CLOSED shift it never changes again: a Z-report is a frozen
+    record, and corrections belong in the audit log."""
+    ctx = ctx or {}
+    if operation == 'delete':
+        raise ValueError('A shift cannot be deleted.')
+    existing = Shift.objects.filter(id=entity_id, shop=shop).first()
+    if existing is not None and existing.status == 'closed':
+        return
+    owner = str(payload.get('owner') or '')[:150]
+    opened_at = _parse_dt(payload.get('opened_at'))
+    if not owner or opened_at is None:
+        raise ValueError('A shift needs its owner and opening time.')
+    report = payload.get('report_json')
+    if isinstance(report, str):
+        try:
+            report = json.loads(report)
+        except ValueError:
+            report = None
+    closed = payload.get('status') == 'closed'
+    defaults = {
+        'owner_username': owner,
+        'user': _shift_cashier(shop, owner, ctx),
+        'status': 'closed' if closed else 'open',
+        'opened_at': opened_at,
+        'opening_float': payload.get('opening_float') or 0,
+        'closed_at': _parse_dt(payload.get('closed_at')) if closed else None,
+        'expected_cash': payload.get('expected_cash') if closed else None,
+        'counted_cash': payload.get('counted_cash') if closed else None,
+        'variance': payload.get('variance') if closed else None,
+        'z_number': payload.get('z_number') if closed else None,
+        'notes': str(payload.get('notes') or ''),
+        'report': report if closed else None,
+    }
+    if existing is None:
+        defaults['device'] = ctx.get('device')
+    shift, _ = Shift.objects.update_or_create(id=entity_id, shop=shop, defaults=defaults)
+    if closed:
+        audit.record('shift.closed', shop=shop, user=shift.user, target=shift, source='till', device=ctx.get('device'),
+                     actor_name=shift.owner_username,
+                     summary=f'Z-report #{shift.z_number}: expected {shift.expected_cash}, counted {shift.counted_cash}, '
+                             f'variance {shift.variance}',
+                     data={'variance': str(shift.variance), 'expected': str(shift.expected_cash),
+                           'counted': str(shift.counted_cash)})
+
+
+def _apply_cash_movement(shop, entity_id, operation, payload, ctx=None):
+    """Cash paid into or out of a shift's drawer, with its reason. Append-only."""
+    ctx = ctx or {}
+    if operation != 'create':
+        raise ValueError('A cash movement can only be created.')
+    if CashMovement.objects.filter(id=entity_id, shop=shop).exists():
+        return
+    shift = Shift.objects.filter(id=payload.get('shift_id'), shop=shop).first()
+    if shift is None:
+        raise _Skip()  # its shift has not arrived yet
+    if payload.get('kind') not in ('paid_in', 'paid_out'):
+        raise ValueError('Unknown cash movement kind.')
+    occurred_at = _parse_dt(payload.get('created_at')) or timezone.now()
+    CashMovement.objects.create(
+        id=entity_id, shop=shop, shift=shift, kind=payload['kind'], amount=payload.get('amount') or 0,
+        reason=str(payload.get('reason') or '')[:255], occurred_at=occurred_at, user=shift.user,
+    )
+
+
+def _apply_stock_movement(shop, entity_id, operation, payload, ctx=None):
+    """Damage or a stock count recorded on a till (protocol 4).
+
+    entity_id is the till's document id; every movement it produces here carries it as
+    client_ref, which is how a repeat is recognised and how the till knows, on its next pull,
+    that these rows are its own and already applied locally.
+
+      damage:     {kind, product_id, variant_id?, quantity, reason, created_at, actor}
+      adjustment: {kind, product_id, variant_id?, counted_quantity, reason, created_at, actor}
+
+    Damage: any worker, reason required. The till already took the goods out of its own stock,
+    so if other tills have meanwhile sold some of them, the cloud writes off what it still has
+    rather than refusing (the goods are gone either way). A stock count: owners only.
+    """
+    ctx = ctx or {}
+    if operation != 'create':
+        raise ValueError('A stock movement can only be created.')
+    if StockMovement.objects.filter(shop=shop, client_ref=entity_id).exists():
+        return
+    try:
+        item = InventoryItem.objects.select_for_update().get(id=payload.get('product_id'), shop=shop)
+    except (InventoryItem.DoesNotExist, ValueError, DjangoValidationError):
+        raise _Skip()  # the product has not arrived yet
+    variant = None
+    if payload.get('variant_id'):
+        variant = item.variants.filter(id=payload['variant_id']).first()
+    user = ctx.get('user')
+    common = dict(variant=variant, user=user, source='till', client_ref=entity_id,
+                  at=_parse_dt(payload.get('created_at')), actor_name=(payload.get('actor') or None))
+    kind = payload.get('kind')
+    if kind == 'damage':
+        available = ledger.on_hand(item, variant)
+        wanted = ledger._whole(payload.get('quantity') or 0, 'Quantity')
+        quantity = min(wanted, available)
+        if quantity <= 0:
+            return  # nothing left on the cloud's side to write off
+        ledger.record_damage(shop, item, quantity, payload.get('reason') or '', **common)
+        audit.record('stock.damage', shop=shop, user=user, target=item, source='till', device=ctx.get('device'),
+                     actor_name=payload.get('actor') or None, reason=payload.get('reason') or '',
+                     summary=f'Wrote off {quantity} x {item.name} as damaged', data={'quantity': quantity})
+    elif kind == 'adjustment':
+        if not is_owner(user):
+            raise ValueError('Only an owner can adjust stock after a count.')
+        moves = ledger.record_stock_count(shop, item, payload.get('counted_quantity'), payload.get('reason') or '', **common)
+        if moves:
+            audit.record('stock.count', shop=shop, user=user, target=item, source='till', device=ctx.get('device'),
+                         actor_name=payload.get('actor') or None, reason=payload.get('reason') or '',
+                         summary=f'Stock count of {item.name}: system {moves[0].system_quantity}, counted {moves[0].counted_quantity}',
+                         data={'system': str(moves[0].system_quantity), 'counted': str(moves[0].counted_quantity)})
+    else:
+        raise ValueError('Unknown stock movement kind.')
+
+
+# What this cloud understands. Sent with every pull so a till only switches to newer operation
+# types once the cloud it talks to can apply them.
+#   2: sale_doc, sale_payment          3: shift, cash_movement
+#   4: stock_movement (damage, stock count) both ways
+SYNC_PROTOCOL = 4
 
 _HANDLERS = {
     'product': _apply_product,
@@ -386,6 +550,9 @@ _HANDLERS = {
     'sale_item': _apply_sale_item,
     'sale_doc': _apply_sale_doc,
     'sale_payment': _apply_sale_payment,
+    'shift': _apply_shift,
+    'cash_movement': _apply_cash_movement,
+    'stock_movement': _apply_stock_movement,
 }
 
 # Same events a REST create/update/delete on the equivalent resource would
@@ -398,6 +565,7 @@ _EVENT_ENTITY = {
     'product': 'inventoryitem', 'stock_batch': 'stockbatch',
     'customer': 'customer', 'sale': 'sale', 'sale_item': 'saleitem',
     'sale_doc': 'sale', 'sale_payment': 'sale',
+    'shift': 'shift', 'cash_movement': 'cashmovement', 'stock_movement': 'stockmovement',
 }
 _EVENT_VERB = {'create': 'created', 'update': 'updated', 'delete': 'deleted'}
 
@@ -534,6 +702,7 @@ class SyncPushView(APIView):
         shop, device = resolve_sync_scope(request)
         operations = request.data.get('operations') or []
         results = []
+        events = {}  # event name -> ids changed, broadcast once per name after the loop
 
         for op in operations:
             op_id = op.get('id')
@@ -625,12 +794,23 @@ class SyncPushView(APIView):
                 continue
 
             if entity_type == 'sale_payment':
-                event, event_payload = 'sale.updated', {'id': str(payload.get('sale_id'))}
+                event, changed_id = 'sale.updated', str(payload.get('sale_id'))
             else:
                 event = f'{_EVENT_ENTITY.get(entity_type, entity_type)}.{_EVENT_VERB.get(operation, operation)}'
-                event_payload = {'id': entity_id}
-            broadcast(shop, event, event_payload)
+                changed_id = str(entity_id)
+            events.setdefault(event, [])
+            if changed_id not in events[event]:
+                events[event].append(changed_id)
             results.append({'id': op_id, 'status': 'applied'})
+
+        # ONE realtime event per kind of change in this batch, not one per operation (G9): 500
+        # queued sales used to mean ~1,500 Shop-row locks, event rows and socket messages, each
+        # making every other till pull again. Same event names as before (the web app reacts to
+        # the name, then refetches), so every client keeps working; `ids` lists what changed.
+        for event, ids in events.items():
+            broadcast(shop, event, {'id': ids[0], 'ids': ids[:200], 'count': len(ids)})
+        if device is not None and any(r['status'] in ('applied', 'already_applied') for r in results):
+            Device.objects.filter(id=device.id).update(last_sync_at=timezone.now())
 
         return Response({'results': results})
 
@@ -662,6 +842,28 @@ def _serialize_stock_batch(o):
     }
 
 
+# Movements a till applies to its own stock when it pulls them. Sales, reversals, receipts and
+# opening balances are left out: the till already derives those from the sales and batches it
+# pulls, so applying them again would count them twice.
+TILL_APPLIED_MOVEMENT_KINDS = (
+    StockMovement.DAMAGE, StockMovement.ADJUSTMENT, StockMovement.REPAIR_PART,
+    StockMovement.REPAIR_PART_RETURN, StockMovement.RETURN, StockMovement.TRANSFER,
+)
+
+
+def _serialize_stock_movement(o):
+    return {
+        'id': str(o.id), 'kind': o.kind, 'product_id': str(o.item_id),
+        'variant_id': str(o.variant_id) if o.variant_id else None,
+        'batch_id': str(o.batch_id) if o.batch_id else None,
+        'quantity': str(o.quantity), 'reason': o.reason, 'actor_name': o.actor_name,
+        'system_quantity': str(o.system_quantity) if o.system_quantity is not None else None,
+        'counted_quantity': str(o.counted_quantity) if o.counted_quantity is not None else None,
+        'client_ref': str(o.client_ref) if o.client_ref else None,
+        'source': o.source, 'created_at': o.created_at.isoformat(),
+    }
+
+
 def _serialize_customer(o):
     return {
         'id': str(o.id), 'name': o.name, 'phone': o.phone,
@@ -673,6 +875,8 @@ def _serialize_sale(o):
     return {
         'id': str(o.id), 'customer_id': str(o.customer_id) if o.customer_id else None,
         'customer_name': o.customer_name, 'staff_name': o.staff_name,
+        # Who rang it up, so a till can show sellers only their own sales and print per-seller reports.
+        'seller_username': o.worker.user.username if o.worker_id and o.worker.user_id else None,
         'payment_method': o.payment_method, 'status': o.status,
         'amount_paid': str(o.amount_paid), 'invoice_number': o.invoice_number,
         'receipt_no': o.receipt_no or None, 'date': o.date.isoformat(),
@@ -701,6 +905,27 @@ def _serialize_sale_item(o):
 PULL_CURSOR_OVERLAP = timedelta(minutes=2)
 
 
+def _parse_pull_cursor(raw, entity_types):
+    """'<type index>|<updated_at iso>|<id>' -> (index, updated_at|None, id|None). Bad input = start."""
+    if not raw:
+        return 0, None, None
+    try:
+        index_s, at_s, id_s = raw.split('|', 2)
+        index = int(index_s)
+    except ValueError:
+        return 0, None, None
+    if not 0 <= index < max(len(entity_types), 1):
+        return 0, None, None
+    if not at_s:
+        return index, None, None
+    at = parse_datetime(at_s)
+    try:
+        row_id = uuid.UUID(id_s)
+    except ValueError:
+        return index, None, None
+    return (index, at, row_id) if at else (index, None, None)
+
+
 class SyncPullView(APIView):
     """GET /api/sync/pull/?since=<ISO8601>&entity_types=product,stock_batch
 
@@ -718,6 +943,8 @@ class SyncPullView(APIView):
         'customer': (Customer, _serialize_customer),
         'sale': (Sale, _serialize_sale),
         'sale_item': (SaleItem, _serialize_sale_item),
+        # After stock_batch, so a till always has the batch before a movement that names it.
+        'stock_movement': (StockMovement, _serialize_stock_movement),
     }
 
     def get(self, request):
@@ -728,20 +955,44 @@ class SyncPullView(APIView):
         since_param = request.query_params.get('since')
         since = parse_datetime(since_param) if since_param else None
         requested = request.query_params.get('entity_types')
-        entity_types = requested.split(',') if requested else list(self.serializers)
+        entity_types = [t for t in (requested.split(',') if requested else list(self.serializers)) if t in self.serializers]
+
+        # Paging (G11). Without `limit` (older tills) everything changed since `since` comes back
+        # in one response, exactly as before. With `limit`, rows come back in a stable order
+        # (entity types in parent-before-child order, then updated_at, then id) and `next_cursor`
+        # says where the next page starts; the till keeps asking until has_more is false.
+        try:
+            limit = max(1, min(int(request.query_params.get('limit')), 2000)) if request.query_params.get('limit') else None
+        except ValueError:
+            limit = None
+        start_type, cursor_at, cursor_id = _parse_pull_cursor(request.query_params.get('cursor'), entity_types)
 
         operations = []
-        for entity_type in entity_types:
-            spec = self.serializers.get(entity_type)
-            if spec is None:
+        has_more = False
+        next_cursor = None
+        for index, entity_type in enumerate(entity_types):
+            if index < start_type:
                 continue
-            model, serialize = spec
+            model, serialize = self.serializers[entity_type]
             qs = model.objects.filter(shop=shop)
             if model is Sale:
-                qs = qs.prefetch_related('payments')
+                qs = qs.prefetch_related('payments').select_related('worker__user')
+            if model is StockMovement:
+                qs = qs.filter(kind__in=TILL_APPLIED_MOVEMENT_KINDS)
             if since:
                 qs = qs.filter(updated_at__gt=since)
-            for obj in qs:
+            if index == start_type and cursor_at is not None:
+                qs = qs.filter(Q(updated_at__gt=cursor_at) | Q(updated_at=cursor_at, id__gt=cursor_id))
+            qs = qs.order_by('updated_at', 'id')
+            if limit is not None:
+                room = limit - len(operations)
+                rows = list(qs[:room + 1])
+                if len(rows) > room:
+                    rows = rows[:room]
+                    has_more = True
+            else:
+                rows = qs
+            for obj in rows:
                 operations.append({
                     'entity_type': entity_type,
                     'entity_id': str(obj.id),
@@ -749,8 +1000,19 @@ class SyncPullView(APIView):
                     'payload': serialize(obj),
                     'updated_at': obj.updated_at.isoformat(),
                 })
+            if has_more:
+                last = rows[-1] if rows else None
+                next_cursor = f'{index}|{last.updated_at.isoformat()}|{last.id}' if last else f'{index}||'
+                break
+            if limit is not None and len(operations) >= limit and index + 1 < len(entity_types):
+                # This page is full exactly at a type boundary: the next page starts at the next type.
+                has_more = True
+                next_cursor = f'{index + 1}||'
+                break
 
         return Response({
+            'has_more': has_more,
+            'next_cursor': next_cursor,
             'operations': operations,
             'server_time': timezone.now().isoformat(),
             # The cursor to send as `since` next time (see PULL_CURSOR_OVERLAP).

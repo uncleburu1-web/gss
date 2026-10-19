@@ -1,12 +1,33 @@
 import asyncio
 import json
 import logging
+import uuid
 
+from channels.db import database_sync_to_async
 from channels.generic.websocket import AsyncWebsocketConsumer
+from django.utils import timezone
 
 from .events import shop_group_name
 
 logger = logging.getLogger(__name__)
+
+# A socket's pong counts as its till's heartbeat, but the database is written at most this often.
+PRESENCE_WRITE_EVERY_SECONDS = 60
+
+
+@database_sync_to_async
+def _stamp_device_presence(device_id, shop_ids, user):
+    """Record that this till is alive. Only for a desktop device that belongs to one of the shops
+    this socket was authorised for, and has not been removed. Returns True if stamped."""
+    from devices.models import Device
+    try:
+        device_uuid = uuid.UUID(str(device_id))
+    except (TypeError, ValueError):
+        return False
+    updated = Device.objects.filter(
+        id=device_uuid, shop_id__in=shop_ids, device_type='desktop', is_deleted=False,
+    ).update(last_ws_seen_at=timezone.now(), current_user=user)
+    return bool(updated)
 
 
 class ShopEventsConsumer(AsyncWebsocketConsumer):
@@ -58,6 +79,7 @@ class ShopEventsConsumer(AsyncWebsocketConsumer):
 
         self._last_pong_at = None
         self._heartbeat_task = asyncio.ensure_future(self._heartbeat_loop())
+        await self._note_presence(asyncio.get_event_loop().time())
 
     async def disconnect(self, close_code):
         task = getattr(self, '_heartbeat_task', None)
@@ -80,7 +102,22 @@ class ShopEventsConsumer(AsyncWebsocketConsumer):
         except (TypeError, ValueError):
             return
         if isinstance(data, dict) and data.get('type') == 'pong':
-            self._last_pong_at = asyncio.get_event_loop().time()
+            now = asyncio.get_event_loop().time()
+            self._last_pong_at = now
+            await self._note_presence(now)
+
+    async def _note_presence(self, now):
+        device_id = self.scope.get('device_id')
+        if not device_id:
+            return
+        last = getattr(self, '_presence_written_at', None)
+        if last is not None and now - last < PRESENCE_WRITE_EVERY_SECONDS:
+            return
+        self._presence_written_at = now
+        try:
+            await _stamp_device_presence(device_id, [s.id for s in self.scope.get('shops') or []], self.scope.get('user'))
+        except Exception:
+            logger.debug('presence stamp failed', exc_info=True)
 
     async def _heartbeat_loop(self):
         """Distinguishes "the WebSocket is technically still open" from

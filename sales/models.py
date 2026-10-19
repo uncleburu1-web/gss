@@ -63,6 +63,11 @@ class Sale(SyncModel):
         null=True, blank=True,
         help_text='When the cloud received it. `date` is when it was rung up; a large gap means it was sold offline.',
     )
+    shift_ref = models.UUIDField(
+        null=True, blank=True, db_index=True,
+        help_text="The till shift it was rung up in (shifts.Shift id). A plain id, not a foreign key: a "
+                  "sale can reach the cloud before its shift does, and must never wait for it.",
+    )
 
     class Meta:
         ordering = ['-date']

@@ -18,7 +18,7 @@ from core.capabilities import capabilities_for_user, effective_role_permissions,
 from core.utils import get_shop_for_user, get_shops_for_user, get_organization_for_user
 from core.auth_serializers import DeviceAwareTokenObtainPairSerializer
 from core.email_utils import send_otp_email
-from devices.models import Device, ONLINE_THRESHOLD
+from devices.models import Device
 from staff.models import Worker
 from subscriptions.models import get_or_create_subscription
 
@@ -326,6 +326,10 @@ class ControlCenterView(APIView):
             RolePermission.objects.update_or_create(
                 organization=org, role=role, capability=capability, defaults={'allowed': allowed},
             )
+            import audit
+            audit.record('permissions.changed', organization=org, user=request.user,
+                         summary=f"{'Allowed' if allowed else 'Stopped'} role {role} to {capability}",
+                         data={'role': role, 'capability': capability, 'allowed': allowed})
         return Response({
             'roles': CONFIGURABLE_ROLES,
             'capabilities': effective_role_permissions(org),
@@ -402,7 +406,9 @@ class DashboardStatsView(APIView):
             shop__in=shops, quantity_remaining__gt=0, expiry_date__isnull=False,
             expiry_date__lte=today + timedelta(days=30), is_deleted=False,
         ).count()
-        todays_sales = Sale.objects.filter(shop__in=shops, date__date=today, is_deleted=False)
+        from sales.visibility import visible_sales
+        # A seller's dashboard shows their own takings; the owner's shows everyone's.
+        todays_sales = visible_sales(Sale.objects.filter(shop__in=shops, date__date=today, is_deleted=False), request.user)
         today_revenue = sum(s.total for s in todays_sales)
         today_profit = sum(s.profit for s in todays_sales)
 
@@ -461,7 +467,9 @@ class RecentActivityView(APIView):
                 'timestamp': p.date,
             })
 
-        for s in Sale.objects.filter(shop__in=shops, is_deleted=False).prefetch_related('items').order_by('-date')[:10]:
+        from sales.visibility import visible_sales
+        own_or_all = visible_sales(Sale.objects.filter(shop__in=shops, is_deleted=False), request.user)
+        for s in own_or_all.prefetch_related('items').order_by('-date')[:10]:
             first_item = s.items.first()
             label = first_item.item_name if first_item else 'items'
             extra = s.items.count() - 1
@@ -505,13 +513,12 @@ class CeoShopStatusView(APIView):
         sub = get_or_create_subscription(shop.organization)
         effective = sub.effective_status
 
-        desktop = Device.objects.filter(
-            shop=shop, device_type='desktop', is_deleted=False
-        ).order_by('-last_seen_at').first()
-        now = timezone.now()
-        desktop_connected = bool(
-            desktop and desktop.last_seen_at and now - desktop.last_seen_at <= ONLINE_THRESHOLD
-        )
+        # A till's contact is its HTTP heartbeat OR its live socket (stage 1b: a till with a working
+        # socket no longer sends HTTP heartbeats), so pick and judge the most recently heard-from one.
+        desktops = list(Device.objects.filter(shop=shop, device_type='desktop', is_deleted=False))
+        heard_from = [d for d in desktops if d.last_contact_at]
+        desktop = max(heard_from, key=lambda d: d.last_contact_at) if heard_from else (desktops[0] if desktops else None)
+        desktop_connected = bool(desktop and desktop.is_online)
 
         if effective == 'expired':
             state = 'subscription_expired'
@@ -529,6 +536,8 @@ class CeoShopStatusView(APIView):
             'subscription_status': effective,
             'subscription_in_grace': effective == 'grace',
             'desktop_connected': desktop_connected,
-            'desktop_last_seen': desktop.last_seen_at if desktop else None,
+            'desktop_last_seen': desktop.last_contact_at if desktop else None,
+            # 'online' | 'stale' (on, but uploads stuck or contact 2-15 min ago) | 'offline'
+            'desktop_status': desktop.status if desktop else 'offline',
             'desktop_name': desktop.name if desktop else None,
         })

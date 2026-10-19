@@ -58,17 +58,19 @@ class HeartbeatView(APIView):
         if shop is None:
             return Response({'detail': 'Could not determine which branch this device belongs to.'}, status=409)
 
-        device, _ = Device.objects.update_or_create(
-            id=data['device_id'],
-            defaults={
-                'shop': shop,
-                'device_type': data['device_type'],
-                'name': data.get('name', ''),
-                'app_version': data.get('app_version', ''),
-                'last_seen_at': timezone.now(),
-                'is_deleted': False,
-            },
-        )
+        defaults = {
+            'shop': shop,
+            'device_type': data['device_type'],
+            'name': data.get('name', ''),
+            'app_version': data.get('app_version', ''),
+            'last_seen_at': timezone.now(),
+            'is_deleted': False,
+            'current_user': request.user,
+        }
+        for field in ('pending_ops', 'failed_ops'):
+            if data.get(field) is not None:
+                defaults[field] = data[field]
+        device, _ = Device.objects.update_or_create(id=data['device_id'], defaults=defaults)
         return Response(DeviceSerializer(device).data)
 
 
@@ -100,4 +102,7 @@ class DeviceDetailView(APIView):
             return Response({'detail': 'Device not found.'}, status=404)
         device.is_deleted = True
         device.save(update_fields=['is_deleted', 'updated_at'])
+        import audit
+        audit.record('device.removed', shop=shop, user=request.user, target=device,
+                     summary=f'Removed device {device.name or device.id}')
         return Response(status=204)

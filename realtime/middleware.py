@@ -64,6 +64,9 @@ class JWTAuthMiddleware(BaseMiddleware):
         params = parse_qs(query_string)
         token = params.get('token', [None])[0]
         branch_id = params.get('branch', [None])[0]
+        # A desktop till names itself so its socket's pongs can count as its heartbeat
+        # (devices.Device.last_ws_seen_at). Checked against the user's shops in the consumer.
+        scope['device_id'] = params.get('device', [None])[0]
         if token:
             scope['user'], scope['shops'] = await _resolve_user_and_shops(token, branch_id)
         else:

@@ -1,4 +1,7 @@
+import uuid
+
 from django.db import models
+from django.utils import timezone
 from decimal import Decimal
 from core.models import SyncModel
 
@@ -268,3 +271,83 @@ class StockBatch(SyncModel):
         from django.utils import timezone
         return self.expiry_date < timezone.localdate()
 
+
+
+class StockMovement(models.Model):
+    """One change to the stock of one batch, recorded at the moment it happens. Append-only.
+
+    StockBatch.quantity_remaining stays the number every screen reads (nothing about how
+    stock is shown or sold changes); this ledger is the explanation of that number. For every
+    live batch, the sum of its movements equals its quantity_remaining -- check_stock_drift
+    verifies exactly that and reports any batch where they disagree.
+
+    Quantities are Decimal(12,3) so the ledger can already hold weighed goods; the batch
+    columns stay whole numbers until weighed selling is actually switched on.
+    Positive = stock in, negative = stock out.
+    """
+    OPENING = 'opening'
+    SALE = 'sale'
+    SALE_REVERSAL = 'sale_reversal'
+    RECEIPT = 'receipt'
+    RETURN = 'return'
+    ADJUSTMENT = 'adjustment'
+    DAMAGE = 'damage'
+    TRANSFER = 'transfer'
+    REPAIR_PART = 'repair_part'
+    REPAIR_PART_RETURN = 'repair_part_return'
+    KIND_CHOICES = [
+        (OPENING, 'Opening balance'),
+        (SALE, 'Sale'),
+        (SALE_REVERSAL, 'Sale reversed'),
+        (RECEIPT, 'Stock received'),
+        (RETURN, 'Customer return'),
+        (ADJUSTMENT, 'Stock count adjustment'),
+        (DAMAGE, 'Damaged / written off'),
+        (TRANSFER, 'Transfer'),
+        (REPAIR_PART, 'Used on a service job'),
+        (REPAIR_PART_RETURN, 'Returned from a service job'),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    shop = models.ForeignKey('core.Shop', on_delete=models.CASCADE, related_name='stock_movements')
+    item = models.ForeignKey(InventoryItem, on_delete=models.CASCADE, related_name='movements')
+    variant = models.ForeignKey(ItemVariant, on_delete=models.SET_NULL, null=True, blank=True, related_name='movements')
+    batch = models.ForeignKey(StockBatch, on_delete=models.SET_NULL, null=True, blank=True, related_name='movements')
+    kind = models.CharField(max_length=24, choices=KIND_CHOICES, db_index=True)
+    quantity = models.DecimalField(max_digits=12, decimal_places=3)
+    # Only for a stock count: what the system said vs what was physically counted.
+    system_quantity = models.DecimalField(max_digits=12, decimal_places=3, null=True, blank=True)
+    counted_quantity = models.DecimalField(max_digits=12, decimal_places=3, null=True, blank=True)
+    reason = models.CharField(max_length=255, blank=True)
+    user = models.ForeignKey('auth.User', on_delete=models.SET_NULL, null=True, blank=True, related_name='+')
+    actor_name = models.CharField(max_length=150, blank=True)
+    source = models.CharField(max_length=20, default='web', help_text='web | till | system')
+    # What caused it (a sale line, a repair part, a batch...), as type + id.
+    reference_type = models.CharField(max_length=30, blank=True)
+    reference_id = models.CharField(max_length=64, blank=True, db_index=True)
+    # A till-recorded damage/count is ONE document on the till; on the server it becomes one
+    # movement per batch it touched, all carrying the till's document id here, so the till
+    # recognises them on its next pull and does not apply them a second time.
+    client_ref = models.UUIDField(null=True, blank=True, db_index=True)
+    created_at = models.DateTimeField(default=timezone.now, db_index=True)
+    # The pull cursor walks updated_at; a movement never changes after it is written.
+    updated_at = models.DateTimeField(auto_now=True, db_index=True)
+
+    class Meta:
+        ordering = ['-created_at']
+        indexes = [models.Index(fields=['shop', 'item', 'created_at'])]
+
+    def __str__(self):
+        return f'{self.get_kind_display()} {self.quantity} of {self.item_id}'
+
+    @property
+    def is_deleted(self):  # the sync pull treats every row as live; movements are never deleted
+        return False
+
+    def save(self, *args, **kwargs):
+        if not self._state.adding:
+            raise ValueError('Stock movements are append-only.')
+        super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        raise ValueError('Stock movements are append-only.')
