@@ -42,6 +42,7 @@ INSTALLED_APPS = [
     'devices',
     'subscriptions',
     'sync',
+    'shifts',
     'customers',
     'realtime',
     'branches',

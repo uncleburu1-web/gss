@@ -32,6 +32,7 @@ from devices.models import Device
 from inventory.models import InventoryItem, StockBatch
 from realtime.events import broadcast
 from sales.models import Sale, SaleItem, next_invoice_number
+from shifts.models import CashMovement, Shift
 from sales.payments import apply_legacy_amount_paid, record_payment, recompute_paid, serialize_payment
 from sales.views import _allocate_stock, _restore_stock
 
@@ -183,6 +184,8 @@ def _apply_sale(shop, entity_id, operation, payload, ctx=None):
         sale_date = _sale_date_from_payload(payload)
         if sale_date is not None:
             defaults['date'] = sale_date
+        if payload.get('shift_id'):
+            defaults['shift_ref'] = _uuid_or_none(payload.get('shift_id'))
     # The till's printed receipt number. Only written when sent, so an update from an older client that
     # doesn't know about it can never blank one that is already there; trimmed rather than rejected.
     receipt_no = payload.get('receipt_no')
@@ -317,6 +320,7 @@ def _apply_sale_doc(shop, entity_id, operation, payload, ctx=None):
     if creating:
         defaults['device'] = ctx.get('device')
         defaults['received_at'] = timezone.now()
+        defaults['shift_ref'] = _uuid_or_none(payload.get('shift_id'))
         worker = getattr(ctx.get('user'), 'worker', None)
         if worker is not None:
             defaults['worker'] = worker
@@ -375,9 +379,90 @@ def _apply_sale_payment(shop, entity_id, operation, payload, ctx=None):
     )
 
 
-# What this cloud understands. Sent with every pull so a till only switches to sale_doc and
-# sale_payment once the cloud it talks to can apply them.
-SYNC_PROTOCOL = 2
+def _parse_dt(value):
+    if not isinstance(value, str) or not value:
+        return None
+    parsed = parse_datetime(value)
+    if parsed is not None and timezone.is_naive(parsed):
+        parsed = timezone.make_aware(parsed, dt_timezone.utc)
+    return parsed
+
+
+def _shift_cashier(shop, username, ctx):
+    """The login behind a till's shift owner name, if it belongs to this branch (else None)."""
+    user = ctx.get('user')
+    if user is not None and username and user.get_username() == username:
+        return user
+    from staff.models import Worker
+    worker = Worker.objects.select_related('user').filter(shop=shop, user__username=username).first()
+    return worker.user if worker else None
+
+
+def _apply_shift(shop, entity_id, operation, payload, ctx=None):
+    """A till's cashier shift (stage 3), sent when it opens and again when it closes.
+
+    Upsert by the till's shift id, so a close that arrives first (a till that upgraded mid-shift)
+    still lands. Once the cloud has a CLOSED shift it never changes again: a Z-report is a frozen
+    record, and corrections belong in the audit log."""
+    ctx = ctx or {}
+    if operation == 'delete':
+        raise ValueError('A shift cannot be deleted.')
+    existing = Shift.objects.filter(id=entity_id, shop=shop).first()
+    if existing is not None and existing.status == 'closed':
+        return
+    owner = str(payload.get('owner') or '')[:150]
+    opened_at = _parse_dt(payload.get('opened_at'))
+    if not owner or opened_at is None:
+        raise ValueError('A shift needs its owner and opening time.')
+    report = payload.get('report_json')
+    if isinstance(report, str):
+        try:
+            report = json.loads(report)
+        except ValueError:
+            report = None
+    closed = payload.get('status') == 'closed'
+    defaults = {
+        'owner_username': owner,
+        'user': _shift_cashier(shop, owner, ctx),
+        'status': 'closed' if closed else 'open',
+        'opened_at': opened_at,
+        'opening_float': payload.get('opening_float') or 0,
+        'closed_at': _parse_dt(payload.get('closed_at')) if closed else None,
+        'expected_cash': payload.get('expected_cash') if closed else None,
+        'counted_cash': payload.get('counted_cash') if closed else None,
+        'variance': payload.get('variance') if closed else None,
+        'z_number': payload.get('z_number') if closed else None,
+        'notes': str(payload.get('notes') or ''),
+        'report': report if closed else None,
+    }
+    if existing is None:
+        defaults['device'] = ctx.get('device')
+    Shift.objects.update_or_create(id=entity_id, shop=shop, defaults=defaults)
+
+
+def _apply_cash_movement(shop, entity_id, operation, payload, ctx=None):
+    """Cash paid into or out of a shift's drawer, with its reason. Append-only."""
+    ctx = ctx or {}
+    if operation != 'create':
+        raise ValueError('A cash movement can only be created.')
+    if CashMovement.objects.filter(id=entity_id, shop=shop).exists():
+        return
+    shift = Shift.objects.filter(id=payload.get('shift_id'), shop=shop).first()
+    if shift is None:
+        raise _Skip()  # its shift has not arrived yet
+    if payload.get('kind') not in ('paid_in', 'paid_out'):
+        raise ValueError('Unknown cash movement kind.')
+    occurred_at = _parse_dt(payload.get('created_at')) or timezone.now()
+    CashMovement.objects.create(
+        id=entity_id, shop=shop, shift=shift, kind=payload['kind'], amount=payload.get('amount') or 0,
+        reason=str(payload.get('reason') or '')[:255], occurred_at=occurred_at, user=shift.user,
+    )
+
+
+# What this cloud understands. Sent with every pull so a till only switches to newer operation
+# types once the cloud it talks to can apply them.
+#   2: sale_doc, sale_payment          3: shift, cash_movement
+SYNC_PROTOCOL = 3
 
 _HANDLERS = {
     'product': _apply_product,
@@ -387,6 +472,8 @@ _HANDLERS = {
     'sale_item': _apply_sale_item,
     'sale_doc': _apply_sale_doc,
     'sale_payment': _apply_sale_payment,
+    'shift': _apply_shift,
+    'cash_movement': _apply_cash_movement,
 }
 
 # Same events a REST create/update/delete on the equivalent resource would
@@ -399,6 +486,7 @@ _EVENT_ENTITY = {
     'product': 'inventoryitem', 'stock_batch': 'stockbatch',
     'customer': 'customer', 'sale': 'sale', 'sale_item': 'saleitem',
     'sale_doc': 'sale', 'sale_payment': 'sale',
+    'shift': 'shift', 'cash_movement': 'cashmovement',
 }
 _EVENT_VERB = {'create': 'created', 'update': 'updated', 'delete': 'deleted'}
 
