@@ -1079,7 +1079,8 @@ class SyncPullView(APIView):
             if model is Sale:
                 qs = qs.prefetch_related('payments').select_related('worker__user')
             if model is StockMovement:
-                qs = qs.filter(kind__in=TILL_APPLIED_MOVEMENT_KINDS)
+                # Units moved IN from another branch reach tills as new batches; only moves OUT apply.
+                qs = qs.filter(kind__in=TILL_APPLIED_MOVEMENT_KINDS).exclude(kind=StockMovement.TRANSFER, quantity__gt=0)
             if since:
                 qs = qs.filter(updated_at__gt=since)
             if index == start_type and cursor_at is not None:
