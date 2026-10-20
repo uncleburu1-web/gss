@@ -179,6 +179,8 @@ class SaleViewSet(ShopScopedMixin, viewsets.ModelViewSet):
             record_payment(sale, paying, sale.payment_method, source='web', user=self.request.user)
 
         serializer.instance = sale
+        from sync.views import _audit_discount
+        _audit_discount(sale, {'user': self.request.user}, source='web')
         broadcast(shop, 'sale.created', {
             'id': str(sale.id), 'invoice_number': sale.invoice_number,
             'total': str(sale.total), 'customer_name': sale.customer_name,
@@ -263,6 +265,7 @@ class SaleViewSet(ShopScopedMixin, viewsets.ModelViewSet):
 
         old_total = sale.total
 
+        old_line = {'item': sale_item.item_name, 'quantity': sale_item.quantity, 'unit_price': sale_item.unit_price}
         _restore_stock(sale_item, user=request.user)
 
         new_item = data.get('item')
@@ -304,7 +307,12 @@ class SaleViewSet(ShopScopedMixin, viewsets.ModelViewSet):
         audit.record('sale.item_replaced', shop=sale.shop, user=request.user, target=sale,
                      summary=f'Changed an item on sale #{sale.invoice_number}: total {old_total} -> {new_total}',
                      data={'sale_item': str(sale_item.id), 'new_item_name': data['item_name'],
-                           'old_total': str(old_total), 'new_total': str(new_total)})
+                           'old_total': str(old_total), 'new_total': str(new_total),
+                           'changes': audit.changes(
+                               {**old_line, 'total': old_total},
+                               {'item': sale_item.item_name, 'quantity': sale_item.quantity,
+                                'unit_price': sale_item.unit_price, 'total': new_total},
+                               ('item', 'quantity', 'unit_price', 'total'))})
 
         return Response({
             'sale': SaleSerializer(sale).data,

@@ -323,13 +323,19 @@ class ControlCenterView(APIView):
                     {'detail': f'Invalid change: {change!r}. Need role, capability, and a boolean allowed.'},
                     status=400,
                 )
+            previous = RolePermission.objects.filter(organization=org, role=role, capability=capability).first()
+            from .capabilities import CAPABILITIES as _CAPS
+            was = previous.allowed if previous else (role in _CAPS[capability].get('default_roles', set()))
             RolePermission.objects.update_or_create(
                 organization=org, role=role, capability=capability, defaults={'allowed': allowed},
             )
+            if was == allowed:
+                continue
             import audit
             audit.record('permissions.changed', organization=org, user=request.user,
                          summary=f"{'Allowed' if allowed else 'Stopped'} role {role} to {capability}",
-                         data={'role': role, 'capability': capability, 'allowed': allowed})
+                         data={'role': role, 'capability': capability, 'allowed': allowed,
+                               'changes': {'allowed': [str(was), str(allowed)]}})
         return Response({
             'roles': CONFIGURABLE_ROLES,
             'capabilities': effective_role_permissions(org),

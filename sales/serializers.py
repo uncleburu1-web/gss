@@ -108,7 +108,7 @@ class SaleSerializer(serializers.ModelSerializer):
 class AddPaymentSerializer(serializers.Serializer):
     amount = serializers.DecimalField(max_digits=12, decimal_places=2, min_value=Decimal('0.01'))
     # Optional: how this installment was paid. Omitted -> the sale's own payment method, as before.
-    method = serializers.ChoiceField(choices=['cash', 'transfer', 'pos', 'other'], required=False)
+    method = serializers.ChoiceField(choices=['cash', 'transfer', 'pos', 'mobile', 'other'], required=False)
 
 
 class ReplaceSaleItemSerializer(serializers.Serializer):

@@ -17,6 +17,7 @@ class Sale(SyncModel):
         ('cash', 'Cash'),
         ('transfer', 'Transfer'),
         ('pos', 'POS/Card'),
+        ('mobile', 'Mobile money'),
     ]
     STATUS_CHOICES = [
         ('completed', 'Completed'),

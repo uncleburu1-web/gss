@@ -34,6 +34,25 @@ class InventoryItemViewSet(ShopScopedMixin, viewsets.ModelViewSet):
             return InventoryItemDetailSerializer
         return InventoryItemSerializer
 
+    AUDITED_FIELDS = ('name', 'sell_price', 'barcode', 'category', 'min_stock', 'unit')
+
+    def perform_update(self, serializer):
+        before = {f: getattr(serializer.instance, f) for f in self.AUDITED_FIELDS}
+        super().perform_update(serializer)
+        item = serializer.instance
+        diff = audit.changes(before, {f: getattr(item, f) for f in self.AUDITED_FIELDS}, self.AUDITED_FIELDS)
+        if diff:
+            action = 'product.price_changed' if 'sell_price' in diff else 'product.changed'
+            audit.record(action, shop=item.shop, user=self.request.user, target=item,
+                         summary=f'{item.name}: ' + ', '.join(f'{k} {a} -> {b}' for k, (a, b) in diff.items()),
+                         data={'changes': diff})
+
+    def perform_destroy(self, instance):
+        super().perform_destroy(instance)
+        audit.record('product.deleted', shop=instance.shop, user=self.request.user, target=instance,
+                     summary=f'Deleted product {instance.name} (price {instance.sell_price}, {instance.quantity} in stock)',
+                     data={'sell_price': str(instance.sell_price), 'quantity': instance.quantity})
+
     @action(detail=False, methods=['get'], url_path='by-barcode')
     def by_barcode(self, request):
         """GET /api/inventory/items/by-barcode/?code=<scanned value> — exact-match
