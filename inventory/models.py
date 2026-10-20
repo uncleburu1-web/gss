@@ -81,6 +81,11 @@ class InventoryItem(SyncModel):
     unit = models.CharField(max_length=30, default='PIECE', help_text='e.g. TABLET, PIECE, BOX, PACK')
     spec = models.CharField(max_length=100, blank=True, help_text='e.g. 200mg, 15.6-inch')
     min_stock = models.PositiveIntegerField(default=2, help_text='Reorder alert threshold')
+    sold_by_weight = models.BooleanField(
+        default=False,
+        help_text='Sold by the kilogram: sell_price is per kg and quantities may have up to 3 decimals '
+                  '(grams). Every other product is sold in whole units only.',
+    )
     prescription_required = models.BooleanField(
         default=False,
         help_text='Pharmacy shops only — flags a drug that legally cannot be sold without a prescription. '
@@ -229,8 +234,10 @@ class StockBatch(SyncModel):
                    'item with none — unchanged from how batches worked before variants existed.',
     )
     batch_number = models.CharField(max_length=60)
-    quantity_received = models.PositiveIntegerField()
-    quantity_remaining = models.PositiveIntegerField()
+    # Decimal (3 places) so a weighed product's stock can be held in kg; whole-unit products only ever
+    # hold whole numbers (enforced where quantities come in, see inventory.ledger.check_quantity).
+    quantity_received = models.DecimalField(max_digits=12, decimal_places=3)
+    quantity_remaining = models.DecimalField(max_digits=12, decimal_places=3)
     cost_price = models.DecimalField(max_digits=12, decimal_places=2)
     selling_price = models.DecimalField(max_digits=12, decimal_places=2)
     expiry_date = models.DateField(null=True, blank=True)
@@ -379,4 +386,4 @@ class StockTransferLine(models.Model):
     to_item = models.ForeignKey(InventoryItem, on_delete=models.CASCADE, related_name='+')
     from_variant = models.ForeignKey(ItemVariant, on_delete=models.SET_NULL, null=True, blank=True, related_name='+')
     to_variant = models.ForeignKey(ItemVariant, on_delete=models.SET_NULL, null=True, blank=True, related_name='+')
-    quantity = models.PositiveIntegerField()
+    quantity = models.DecimalField(max_digits=12, decimal_places=3)

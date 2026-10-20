@@ -8,6 +8,10 @@ from .models import Sale, SaleItem
 
 
 class SaleItemSerializer(serializers.ModelSerializer):
+    # Numbers, not strings, in JSON (the apps do arithmetic with them). kg for a weighed product.
+    quantity = serializers.DecimalField(max_digits=12, decimal_places=3, coerce_to_string=False, required=False, default=1)
+    stock_shortfall = serializers.DecimalField(max_digits=12, decimal_places=3, coerce_to_string=False, read_only=True)
+    sold_by_weight = serializers.BooleanField(source='item.sold_by_weight', read_only=True, default=False)
     subtotal = serializers.ReadOnlyField()
     tax_amount = serializers.ReadOnlyField()
     total = serializers.ReadOnlyField()
@@ -29,19 +33,23 @@ class SaleItemSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'item', 'variant', 'variant_label', 'item_name', 'category', 'quantity', 'unit_price',
             'unit_cost', 'discount', 'promotion', 'tax_rate', 'subtotal', 'tax_amount', 'total', 'profit', 'margin_percent',
-            'stock_shortfall',
+            'stock_shortfall', 'sold_by_weight',
         ]
-        read_only_fields = ['id', 'stock_shortfall']
+        read_only_fields = ['id', 'stock_shortfall', 'sold_by_weight']
 
     def validate(self, attrs):
         item = attrs.get('item')
         variant = attrs.get('variant')
         quantity = attrs.get('quantity', 1)
 
-        if quantity < 1:
-            raise serializers.ValidationError({
-                'quantity': 'Quantity must be at least 1.'
-            })
+        from inventory.ledger import LedgerError, check_quantity
+        try:
+            quantity = check_quantity(item, quantity)
+        except LedgerError as exc:
+            raise serializers.ValidationError({'quantity': str(exc)})
+        if quantity <= 0:
+            raise serializers.ValidationError({'quantity': 'Quantity must be more than zero.'})
+        attrs['quantity'] = quantity
         if variant is not None and item is not None and variant.item_id != item.id:
             raise serializers.ValidationError({'variant': 'That variant does not belong to this item.'})
         discount = attrs.get('discount') or 0
@@ -151,7 +159,7 @@ class ReplaceSaleItemSerializer(serializers.Serializer):
     item = serializers.PrimaryKeyRelatedField(queryset=InventoryItem.objects.all(), required=False, allow_null=True)
     variant = serializers.PrimaryKeyRelatedField(queryset=ItemVariant.objects.all(), required=False, allow_null=True)
     item_name = serializers.CharField()
-    quantity = serializers.IntegerField(min_value=1, default=1)
+    quantity = serializers.DecimalField(max_digits=12, decimal_places=3, coerce_to_string=False, default=1)
     unit_price = serializers.DecimalField(max_digits=12, decimal_places=2)
     unit_cost = serializers.DecimalField(max_digits=12, decimal_places=2, required=False, default=Decimal('0.00'))
 
@@ -160,10 +168,14 @@ class ReplaceSaleItemSerializer(serializers.Serializer):
         variant = attrs.get('variant')
         quantity = attrs.get('quantity', 1)
 
-        if quantity < 1:
-            raise serializers.ValidationError({
-                'quantity': 'Quantity must be at least 1.'
-            })
+        from inventory.ledger import LedgerError, check_quantity
+        try:
+            quantity = check_quantity(attrs.get('item'), quantity)
+        except LedgerError as exc:
+            raise serializers.ValidationError({'quantity': str(exc)})
+        if quantity <= 0:
+            raise serializers.ValidationError({'quantity': 'Quantity must be more than zero.'})
+        attrs['quantity'] = quantity
         if variant is not None and item is not None and variant.item_id != item.id:
             raise serializers.ValidationError({'variant': 'That variant does not belong to this item.'})
         if item is not None and item.has_variants and variant is None:

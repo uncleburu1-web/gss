@@ -90,12 +90,11 @@ def process_return(sale, lines, *, reason, refund_method='cash', refund_amount=N
         if item is None:
             raise ReturnError('A returned item is not on this sale.')
         try:
-            qty = Decimal(str(line.get('quantity')))
-        except Exception:
-            raise ReturnError('Quantities must be numbers.')
-        if qty != qty.to_integral_value() or qty <= 0:
-            raise ReturnError('Return whole units, at least one.')
-        qty = int(qty)
+            qty = ledger.check_quantity(item.item, line.get('quantity'), 'Quantity returned')
+        except ledger.LedgerError as exc:
+            raise ReturnError(str(exc))
+        if qty <= 0:
+            raise ReturnError('Return at least some of an item.')
         restock = bool(line.get('restock', True))
         key = (str(item.id), restock)
         wanted[key] = wanted.get(key, 0) + qty

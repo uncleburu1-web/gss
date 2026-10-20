@@ -95,6 +95,13 @@ class RepairTicketViewSet(ShopScopedMixin, viewsets.ModelViewSet):
             return Response({'item': 'Not found in this branch\'s inventory.'}, status=400)
 
         try:
+            data['quantity'] = ledger.check_quantity(item, data['quantity'])
+        except ledger.LedgerError as exc:
+            return Response({'quantity': str(exc)}, status=400)
+        if data['quantity'] <= 0:
+            return Response({'quantity': 'Quantity must be more than zero.'}, status=400)
+
+        try:
             # Own savepoint: on a shortfall the batches already walked are put back, instead of
             # the 400 response leaving a half-done deduction behind.
             with transaction.atomic():

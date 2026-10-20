@@ -42,7 +42,9 @@ def matches(promo, line):
 
 
 def discount_for(promo, line):
-    qty = int(line.get('quantity') or 0)
+    # Quantities may be kg (3 decimals) for weighed products: % off and amount-off-each (per kg)
+    # apply to the exact weight; buy-X-get-Y counts whole units only.
+    qty = _dec(line.get('quantity')).quantize(Decimal('0.001'))
     price = _dec(line.get('unit_price'))
     if qty <= 0 or price <= 0:
         return ZERO
@@ -52,7 +54,7 @@ def discount_for(promo, line):
         buy, get = int(promo.get('buy_quantity') or 0), int(promo.get('get_quantity') or 0)
         if buy <= 0 or get <= 0:
             return ZERO
-        free = (qty // (buy + get)) * get
+        free = (int(qty) // (buy + get)) * get
         return min(gross, price * free).quantize(CENT, ROUND_HALF_UP)
     if qty < int(promo.get('min_quantity') or 1):
         return ZERO

@@ -9,10 +9,11 @@ class AddPaymentSerializer(serializers.Serializer):
 
 class AddPartSerializer(serializers.Serializer):
     item = serializers.UUIDField()
-    quantity = serializers.IntegerField(min_value=1, default=1)
+    quantity = serializers.DecimalField(max_digits=12, decimal_places=3, coerce_to_string=False, default=1)
 
 
 class RepairPartSerializer(serializers.ModelSerializer):
+    quantity = serializers.DecimalField(max_digits=12, decimal_places=3, coerce_to_string=False, read_only=True)
     item_name = serializers.CharField(source='item.name', read_only=True)
     total_cost = serializers.SerializerMethodField()
 
