@@ -183,6 +183,8 @@ def _apply_sale(shop, entity_id, operation, payload, ctx=None):
             sale = Sale.objects.get(id=entity_id, shop=shop)
         except Sale.DoesNotExist:
             return  # never arrived and now it's deleted too — nothing to do
+        if sale.returns.filter(is_deleted=False).exists():
+            raise ValueError('This sale has returns recorded against it, so it cannot be deleted.')
         for sale_item in sale.items.all():
             _restore_stock(sale_item, source='till', user=(ctx or {}).get('user'))
             sale_item.is_deleted = True
@@ -441,6 +443,36 @@ def _apply_audit_event(shop, entity_id, operation, payload, ctx=None):
         AuditLog.objects.filter(pk=entry.pk).update(at=at)  # when it happened on the till, not when it arrived
 
 
+def _apply_sale_return(shop, entity_id, operation, payload, ctx=None):
+    """Items returned on a till (protocol 5). Same rules as the web (sales.returns.process_return);
+    the return keeps the till's id, which is how a re-send and the till's own stock are recognised."""
+    from sales.models import SaleReturn
+    from sales.returns import ReturnError, process_return
+    ctx = ctx or {}
+    if operation != 'create':
+        raise ValueError('A return can only be created.')
+    if SaleReturn.objects.filter(id=entity_id).exists():
+        return
+    sale = Sale.objects.select_for_update().filter(id=payload.get('sale_id'), shop=shop).first()
+    if sale is None:
+        raise _Skip()  # the sale has not arrived yet
+    user = ctx.get('user')
+    if not has_capability(user, 'process_return'):
+        raise ValueError("Your role can't take returns — ask an owner or manager.")
+    at = _parse_dt(payload.get('created_at'))
+    if at is not None and at > timezone.now() + MAX_CLIENT_CLOCK_AHEAD:
+        at = None
+    try:
+        process_return(
+            sale, payload.get('lines') or [], reason=payload.get('reason') or '',
+            refund_method=payload.get('refund_method') or 'cash', refund_amount=payload.get('refund_amount'),
+            user=user, actor_name=payload.get('actor') or None, source='till', device=ctx.get('device'),
+            return_id=entity_id, at=at, shift_ref=_uuid_or_none(payload.get('shift_id')),
+        )
+    except ReturnError as exc:
+        raise ValueError(str(exc))
+
+
 def _apply_sale_payment(shop, entity_id, operation, payload, ctx=None):
     """One payment taken on the till against an existing sale (an installment). Append-only:
     the cloud ADDS it, so a payment taken on the web meanwhile is never overwritten (G2)."""
@@ -620,6 +652,7 @@ _HANDLERS = {
     'cash_movement': _apply_cash_movement,
     'stock_movement': _apply_stock_movement,
     'audit_event': _apply_audit_event,
+    'sale_return': _apply_sale_return,
 }
 
 # Same events a REST create/update/delete on the equivalent resource would
@@ -633,6 +666,7 @@ _EVENT_ENTITY = {
     'customer': 'customer', 'sale': 'sale', 'sale_item': 'saleitem',
     'sale_doc': 'sale', 'sale_payment': 'sale',
     'shift': 'shift', 'cash_movement': 'cashmovement', 'stock_movement': 'stockmovement',
+    'sale_return': 'sale', 'audit_event': 'auditlog',
 }
 _EVENT_VERB = {'create': 'created', 'update': 'updated', 'delete': 'deleted'}
 
@@ -860,7 +894,7 @@ class SyncPushView(APIView):
                 results.append({'id': op_id, 'status': 'rejected', 'error': str(exc)})
                 continue
 
-            if entity_type == 'sale_payment':
+            if entity_type in ('sale_payment', 'sale_return'):
                 event, changed_id = 'sale.updated', str(payload.get('sale_id'))
             else:
                 event = f'{_EVENT_ENTITY.get(entity_type, entity_type)}.{_EVENT_VERB.get(operation, operation)}'

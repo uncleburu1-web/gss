@@ -100,6 +100,15 @@ CAPABILITIES = {
         'default_roles': set(),
     },
 
+    'process_return': {
+        'label': 'Take back returned items and refund',
+        'description': (
+            'Accept items a customer brings back on a completed sale, put them back in stock (or write '
+            'them off if damaged) and refund the money. A reason is always required. Off by default.'
+        ),
+        'default_roles': set(),
+    },
+
     'view_all_sales': {
         'label': "See every seller's sales, shifts and day reports",
         'description': (

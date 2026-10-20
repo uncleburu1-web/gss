@@ -49,12 +49,16 @@ class SalesSummaryView(APIView):
         sale_qs = Sale.objects.filter(shop__in=shops, date__gte=start, date__lt=end, is_deleted=False)
         repair_qs = RepairPayment.objects.filter(shop__in=shops, date__gte=start, date__lt=end)
 
-        product_sales = sum(i.total for i in item_qs)
+        from sales.returns import returns_between
+        returns = returns_between(shops, start, end)
+        # Net of returns recorded in this period (a return is counted when it happens, not on the
+        # original sale's date, so a past period's figures never change afterwards).
+        product_sales = sum(i.total for i in item_qs) - returns['value']
         service_revenue = sum(p.amount for p in repair_qs)
         total_sales = product_sales + service_revenue
-        gross_profit = sum(i.profit for i in item_qs)
+        gross_profit = sum(i.profit for i in item_qs) - returns['profit']
         number_of_sales = sale_qs.count()
-        items_sold = sum(i.quantity for i in item_qs)
+        items_sold = sum(i.quantity for i in item_qs) - returns['units']
 
         buckets = defaultdict(lambda: {'sales': 0, 'count': 0})
         if granularity == 'day':
@@ -90,6 +94,9 @@ class SalesSummaryView(APIView):
             'gross_profit': gross_profit,
             'number_of_sales': number_of_sales,
             'items_sold': items_sold,
+            'returns_value': returns['value'],
+            'refunds_paid': returns['refunded'],
+            'returns_count': returns['count'],
             'series': series,
         })
 

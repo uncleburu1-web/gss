@@ -415,8 +415,15 @@ class DashboardStatsView(APIView):
         from sales.visibility import visible_sales
         # A seller's dashboard shows their own takings; the owner's shows everyone's.
         todays_sales = visible_sales(Sale.objects.filter(shop__in=shops, date__date=today, is_deleted=False), request.user)
-        today_revenue = sum(s.total for s in todays_sales)
-        today_profit = sum(s.profit for s in todays_sales)
+        from sales.models import SaleReturn
+        todays_returns = SaleReturn.objects.filter(
+            sale__in=visible_sales(Sale.objects.filter(shop__in=shops), request.user),
+            returned_at__date=today, is_deleted=False,
+        )
+        returned_value = sum(r.total_value for r in todays_returns)
+        returned_profit = sum(r.total_value - r.total_cost for r in todays_returns)
+        today_revenue = sum(s.total for s in todays_sales) - returned_value
+        today_profit = sum(s.profit for s in todays_sales) - returned_profit
 
         todays_repair_payments = RepairPayment.objects.filter(shop__in=shops, date__date=today)
         service_revenue_today = sum(p.amount for p in todays_repair_payments)
