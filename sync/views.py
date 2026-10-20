@@ -35,6 +35,8 @@ from inventory import ledger
 from inventory.models import InventoryItem, StockBatch, StockMovement
 from realtime.events import broadcast
 from sales.models import Sale, SaleItem, next_invoice_number
+from promotions.engine import as_dict as _promotion_as_dict
+from promotions.models import Promotion
 from shifts.models import CashMovement, Shift
 from sales.payments import apply_legacy_amount_paid, record_payment, recompute_paid, serialize_payment
 from sales.views import _allocate_stock, _restore_stock
@@ -375,11 +377,14 @@ def _apply_sale_doc(shop, entity_id, operation, payload, ctx=None):
                 raise ValueError('A sale line id is already used by a different sale.')
             continue  # already applied: never allocate stock twice
         item = products.get(line.get('product_id')) if line.get('product_id') else None
+        promotion = None
+        if line.get('promotion_id'):
+            promotion = Promotion.objects.filter(id=_uuid_or_none(line['promotion_id']), shop=shop).first()
         sale_item = SaleItem.objects.create(
             id=line['id'], shop=shop, sale=sale, item=item,
             item_name=line.get('item_name', ''), category=line.get('category') or '',
             quantity=line.get('quantity') or 1, unit_price=line.get('unit_price') or 0,
-            discount=line.get('discount') or 0,
+            discount=line.get('discount') or 0, promotion=promotion,
         )
         if item is not None:
             _allocate_stock(sale_item, shop, source='till')  # the cloud's own FEFO, as for every other sale
@@ -401,7 +406,8 @@ def _apply_sale_doc(shop, entity_id, operation, payload, ctx=None):
 
 def _audit_discount(sale, ctx, source):
     """A sale rung up with any discount leaves an audit line: who gave how much off what."""
-    lines = [(i.item_name, i.discount, i.quantity * i.unit_price) for i in sale.items.all() if i.discount]
+    # Promotion discounts are the owner's own rules, not a cashier's decision: not audited per sale.
+    lines = [(i.item_name, i.discount, i.quantity * i.unit_price) for i in sale.items.all() if i.discount and not i.promotion_id]
     if not lines:
         return
     total = sum(d for _, d, _ in lines)
@@ -965,6 +971,10 @@ def _serialize_stock_movement(o):
     }
 
 
+def _serialize_promotion(o):
+    return _promotion_as_dict(o)
+
+
 def _serialize_customer(o):
     return {
         'id': str(o.id), 'name': o.name, 'phone': o.phone,
@@ -1046,6 +1056,7 @@ class SyncPullView(APIView):
         'sale_item': (SaleItem, _serialize_sale_item),
         # After stock_batch, so a till always has the batch before a movement that names it.
         'stock_movement': (StockMovement, _serialize_stock_movement),
+        'promotion': (Promotion, _serialize_promotion),
     }
 
     def get(self, request):

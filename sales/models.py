@@ -147,6 +147,10 @@ class SaleItem(SyncModel):
     unit_price = models.DecimalField(max_digits=12, decimal_places=2)
     unit_cost = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal('0.00'))
     discount = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal('0.00'))
+    promotion = models.ForeignKey(
+        'promotions.Promotion', on_delete=models.SET_NULL, null=True, blank=True, related_name='sale_items',
+        help_text='The promotion that set this line\'s discount (blank = no promotion / a manual discount).',
+    )
     tax_rate = models.DecimalField(max_digits=5, decimal_places=2, default=Decimal('0.00'), help_text='Percent, e.g. 7.5')
     stock_shortfall = models.PositiveIntegerField(
         default=0,

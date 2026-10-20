@@ -1,5 +1,7 @@
 from decimal import Decimal
 from rest_framework import serializers
+
+from promotions.models import Promotion
 from inventory.models import InventoryItem, ItemVariant
 from customers.models import Customer
 from .models import Sale, SaleItem
@@ -17,12 +19,16 @@ class SaleItemSerializer(serializers.ModelSerializer):
     variant = serializers.PrimaryKeyRelatedField(
         queryset=ItemVariant.objects.all(), required=False, allow_null=True
     )
+    promotion = serializers.PrimaryKeyRelatedField(
+        queryset=Promotion.objects.filter(is_deleted=False),
+        required=False, allow_null=True,
+    )
 
     class Meta:
         model = SaleItem
         fields = [
             'id', 'item', 'variant', 'variant_label', 'item_name', 'category', 'quantity', 'unit_price',
-            'unit_cost', 'discount', 'tax_rate', 'subtotal', 'tax_amount', 'total', 'profit', 'margin_percent',
+            'unit_cost', 'discount', 'promotion', 'tax_rate', 'subtotal', 'tax_amount', 'total', 'profit', 'margin_percent',
             'stock_shortfall',
         ]
         read_only_fields = ['id', 'stock_shortfall']
@@ -38,6 +44,9 @@ class SaleItemSerializer(serializers.ModelSerializer):
             })
         if variant is not None and item is not None and variant.item_id != item.id:
             raise serializers.ValidationError({'variant': 'That variant does not belong to this item.'})
+        discount = attrs.get('discount') or 0
+        if discount < 0 or discount > (attrs.get('unit_price') or 0) * quantity:
+            raise serializers.ValidationError({'discount': 'A discount must be between zero and what the line costs.'})
         if item is not None and item.has_variants and variant is None:
             raise serializers.ValidationError({'variant': f'"{item.name}" has sizes/colors — pick which one is being sold.'})
         # Check stock against the specific variant sold, not the item's
