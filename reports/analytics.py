@@ -77,6 +77,12 @@ def sales_financials(shops, start, end):
         cogs += i.unit_cost * i.quantity
         gross_profit += i.profit
 
+    from sales.returns import returns_between
+    returned = returns_between(shops, start, end)
+    revenue -= returned['value']
+    cogs -= returned['cost']
+    gross_profit -= returned['profit']
+
     transaction_count = sale_qs.count()
     avg_transaction_value = (revenue / transaction_count) if transaction_count else ZERO
     return {

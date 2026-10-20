@@ -15,7 +15,7 @@ from realtime.events import broadcast
 from .models import Sale, SaleItem, SaleAllocation, next_invoice_number
 from .payments import recompute_paid, record_payment
 from .visibility import visible_sales
-from .serializers import SaleSerializer, AddPaymentSerializer, ReplaceSaleItemSerializer
+from .serializers import SaleSerializer, AddPaymentSerializer, ReplaceSaleItemSerializer, ReturnInputSerializer
 
 
 def _sale_actor(sale_item):
@@ -136,6 +136,8 @@ class SaleViewSet(ShopScopedMixin, viewsets.ModelViewSet):
             return [HasCapability('delete_sale')()]
         if self.action == 'replace_item':
             return [HasCapability('edit_sale')()]
+        if self.action == 'take_return':
+            return [HasCapability('process_return')()]
         return super().get_permissions()
 
     def create(self, request, *args, **kwargs):
@@ -179,13 +181,46 @@ class SaleViewSet(ShopScopedMixin, viewsets.ModelViewSet):
             record_payment(sale, paying, sale.payment_method, source='web', user=self.request.user)
 
         serializer.instance = sale
+        from sync.views import _audit_discount
+        _audit_discount(sale, {'user': self.request.user}, source='web')
         broadcast(shop, 'sale.created', {
             'id': str(sale.id), 'invoice_number': sale.invoice_number,
             'total': str(sale.total), 'customer_name': sale.customer_name,
         })
 
+    @action(detail=True, methods=['post'], url_path='return')
+    def take_return(self, request, pk=None):
+        """POST {lines: [{sale_item, quantity, restock}], reason, refund_method, refund_amount?}.
+        Idempotency-Key supported: a retried request returns the first result."""
+        return run_idempotent(request, lambda: self._take_return(request))
+
+    def _take_return(self, request):
+        from .returns import ReturnError, process_return
+        sale = self.get_object()
+        serializer = ReturnInputSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+        try:
+            with transaction.atomic():
+                Sale.objects.select_for_update().filter(pk=sale.pk).first()
+                ret = process_return(
+                    sale, [{'sale_item_id': l['sale_item'], 'quantity': l['quantity'], 'restock': l['restock']} for l in data['lines']],
+                    reason=data['reason'], refund_method=data['refund_method'], refund_amount=data.get('refund_amount'),
+                    user=request.user, source='web',
+                )
+        except ReturnError as exc:
+            return Response({'detail': str(exc)}, status=400)
+        broadcast(sale.shop, 'sale.updated', {'id': str(sale.id)})
+        broadcast(sale.shop, 'inventoryitem.updated', {'id': None})
+        sale = Sale.objects.prefetch_related('items').get(pk=sale.pk)
+        return Response({'return_id': str(ret.id), 'refund_amount': str(ret.refund_amount),
+                         'total_value': str(ret.total_value), 'sale': SaleSerializer(sale).data}, status=201)
+
     @transaction.atomic
     def perform_destroy(self, instance):
+        if instance.returns.filter(is_deleted=False).exists():
+            from rest_framework.exceptions import ValidationError as DRFValidationError
+            raise DRFValidationError({'detail': 'This sale has returns recorded against it, so it cannot be deleted.'})
         # Soft delete, cascaded by hand: a hard DELETE never reaches the
         # sync queue (see ShopScopedMixin.perform_destroy), and reports
         # query SaleItem directly — if the header were tombstoned but its
@@ -261,8 +296,11 @@ class SaleViewSet(ShopScopedMixin, viewsets.ModelViewSet):
         elif sale_item.sale_id != sale.id:
             return Response({'sale_item': 'That item does not belong to this sale.'}, status=400)
 
+        if sale.returns.filter(is_deleted=False).exists():
+            return Response({'detail': 'This sale has returns recorded against it; record another return instead of editing it.'}, status=400)
         old_total = sale.total
 
+        old_line = {'item': sale_item.item_name, 'quantity': sale_item.quantity, 'unit_price': sale_item.unit_price}
         _restore_stock(sale_item, user=request.user)
 
         new_item = data.get('item')
@@ -304,7 +342,12 @@ class SaleViewSet(ShopScopedMixin, viewsets.ModelViewSet):
         audit.record('sale.item_replaced', shop=sale.shop, user=request.user, target=sale,
                      summary=f'Changed an item on sale #{sale.invoice_number}: total {old_total} -> {new_total}',
                      data={'sale_item': str(sale_item.id), 'new_item_name': data['item_name'],
-                           'old_total': str(old_total), 'new_total': str(new_total)})
+                           'old_total': str(old_total), 'new_total': str(new_total),
+                           'changes': audit.changes(
+                               {**old_line, 'total': old_total},
+                               {'item': sale_item.item_name, 'quantity': sale_item.quantity,
+                                'unit_price': sale_item.unit_price, 'total': new_total},
+                               ('item', 'quantity', 'unit_price', 'total'))})
 
         return Response({
             'sale': SaleSerializer(sale).data,

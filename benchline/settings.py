@@ -44,6 +44,7 @@ INSTALLED_APPS = [
     'sync',
     'shifts',
     'audit',
+    'promotions',
     'customers',
     'realtime',
     'branches',

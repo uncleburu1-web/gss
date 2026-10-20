@@ -35,6 +35,8 @@ from inventory import ledger
 from inventory.models import InventoryItem, StockBatch, StockMovement
 from realtime.events import broadcast
 from sales.models import Sale, SaleItem, next_invoice_number
+from promotions.engine import as_dict as _promotion_as_dict
+from promotions.models import Promotion
 from shifts.models import CashMovement, Shift
 from sales.payments import apply_legacy_amount_paid, record_payment, recompute_paid, serialize_payment
 from sales.views import _allocate_stock, _restore_stock
@@ -65,9 +67,17 @@ def _is_repeat_create(model, shop, entity_id, operation):
     return operation == 'create' and model.objects.filter(id=entity_id, shop=shop).exists()
 
 
+_PRODUCT_AUDITED = ('name', 'sell_price', 'barcode', 'category', 'min_stock', 'unit')
+
+
 def _apply_product(shop, entity_id, operation, payload, ctx=None):
+    ctx = ctx or {}
     if operation == 'delete':
+        item = InventoryItem.objects.filter(id=entity_id, shop=shop, is_deleted=False).first()
         InventoryItem.objects.filter(id=entity_id, shop=shop).update(is_deleted=True)
+        if item is not None:
+            audit.record('product.deleted', shop=shop, user=ctx.get('user'), target=item, source='till',
+                         device=ctx.get('device'), summary=f'Deleted product {item.name} on a till')
         return
     if _is_repeat_create(InventoryItem, shop, entity_id, operation):
         return
@@ -100,7 +110,17 @@ def _apply_product(shop, entity_id, operation, payload, ctx=None):
     # check instead of always defaulting to payload.get('image_url').
     if 'image_url' in payload:
         defaults['image_url'] = payload.get('image_url') or None
-    InventoryItem.objects.update_or_create(id=entity_id, shop=shop, defaults=defaults)
+    existing = InventoryItem.objects.filter(id=entity_id, shop=shop).first()
+    before = {f: getattr(existing, f) for f in _PRODUCT_AUDITED} if existing else None
+    item, _ = InventoryItem.objects.update_or_create(id=entity_id, shop=shop, defaults=defaults)
+    if before is not None:
+        item.refresh_from_db()  # compare stored values (900 vs 900.00 is not a change)
+        diff = audit.changes(before, {f: getattr(item, f) for f in _PRODUCT_AUDITED}, _PRODUCT_AUDITED)
+        if diff:
+            audit.record('product.price_changed' if 'sell_price' in diff else 'product.changed', shop=shop,
+                         user=ctx.get('user'), target=item, source='till', device=ctx.get('device'),
+                         summary=f'{item.name}: ' + ', '.join(f'{k} {a} -> {b}' for k, (a, b) in diff.items()),
+                         data={'changes': diff})
 
 
 def _apply_stock_batch(shop, entity_id, operation, payload, ctx=None):
@@ -165,6 +185,8 @@ def _apply_sale(shop, entity_id, operation, payload, ctx=None):
             sale = Sale.objects.get(id=entity_id, shop=shop)
         except Sale.DoesNotExist:
             return  # never arrived and now it's deleted too — nothing to do
+        if sale.returns.filter(is_deleted=False).exists():
+            raise ValueError('This sale has returns recorded against it, so it cannot be deleted.')
         for sale_item in sale.items.all():
             _restore_stock(sale_item, source='till', user=(ctx or {}).get('user'))
             sale_item.is_deleted = True
@@ -355,14 +377,20 @@ def _apply_sale_doc(shop, entity_id, operation, payload, ctx=None):
                 raise ValueError('A sale line id is already used by a different sale.')
             continue  # already applied: never allocate stock twice
         item = products.get(line.get('product_id')) if line.get('product_id') else None
+        promotion = None
+        if line.get('promotion_id'):
+            promotion = Promotion.objects.filter(id=_uuid_or_none(line['promotion_id']), shop=shop).first()
         sale_item = SaleItem.objects.create(
             id=line['id'], shop=shop, sale=sale, item=item,
             item_name=line.get('item_name', ''), category=line.get('category') or '',
             quantity=line.get('quantity') or 1, unit_price=line.get('unit_price') or 0,
-            discount=line.get('discount') or 0,
+            discount=line.get('discount') or 0, promotion=promotion,
         )
         if item is not None:
             _allocate_stock(sale_item, shop, source='till')  # the cloud's own FEFO, as for every other sale
+
+    if creating:
+        _audit_discount(sale, ctx, source='till')
 
     for p in payments:
         if not isinstance(p, dict) or not p.get('id'):
@@ -374,6 +402,81 @@ def _apply_sale_doc(shop, entity_id, operation, payload, ctx=None):
             shift_ref=_uuid_or_none(p.get('shift_id')), device=ctx.get('device'), user=ctx.get('user'),
         )
     recompute_paid(sale)
+
+
+def _audit_discount(sale, ctx, source):
+    """A sale rung up with any discount leaves an audit line: who gave how much off what."""
+    # Promotion discounts are the owner's own rules, not a cashier's decision: not audited per sale.
+    lines = [(i.item_name, i.discount, i.quantity * i.unit_price) for i in sale.items.all() if i.discount and not i.promotion_id]
+    if not lines:
+        return
+    total = sum(d for _, d, _ in lines)
+    audit.record('sale.discount', shop=sale.shop, user=ctx.get('user'), target=sale, source=source,
+                 device=ctx.get('device'), actor_name=sale.staff_name or None,
+                 summary=f'Discount of {total} on sale #{sale.invoice_number} '
+                         f'({", ".join(f"{n}: {d}" for n, d, _ in lines)})',
+                 data={'total_discount': str(total),
+                       'lines': [{'item': n, 'discount': str(d), 'before_discount': str(g)} for n, d, g in lines]})
+
+
+# Things a till records that only matter for the audit trail (protocol 5). Append-only; only these
+# actions are accepted, so a till cannot write arbitrary audit lines.
+TILL_AUDIT_ACTIONS = {
+    'sync.retry': 'Retried changes that had failed to sync',
+    'sale.voided_on_till': 'Voided a sale on the till',
+    'drawer.opened': 'Opened the cash drawer without a sale',
+}
+
+
+def _apply_audit_event(shop, entity_id, operation, payload, ctx=None):
+    ctx = ctx or {}
+    if operation != 'create':
+        raise ValueError('An audit event can only be created.')
+    from audit.models import AuditLog
+    if AuditLog.objects.filter(shop=shop, target_type='till_event', target_id=str(entity_id)).exists():
+        return
+    action = payload.get('action')
+    if action not in TILL_AUDIT_ACTIONS:
+        raise ValueError('Unknown audit action.')
+    data = payload.get('data') if isinstance(payload.get('data'), dict) else {}
+    entry = audit.record(action, shop=shop, user=ctx.get('user'), source='till', device=ctx.get('device'),
+                         target_type='till_event', target_id=str(entity_id),
+                         actor_name=(payload.get('actor') or None),
+                         summary=str(payload.get('summary') or TILL_AUDIT_ACTIONS[action])[:255],
+                         reason=str(payload.get('reason') or '')[:255], data=data)
+    at = _parse_dt(payload.get('created_at'))
+    if at is not None and at <= timezone.now():
+        AuditLog.objects.filter(pk=entry.pk).update(at=at)  # when it happened on the till, not when it arrived
+
+
+def _apply_sale_return(shop, entity_id, operation, payload, ctx=None):
+    """Items returned on a till (protocol 5). Same rules as the web (sales.returns.process_return);
+    the return keeps the till's id, which is how a re-send and the till's own stock are recognised."""
+    from sales.models import SaleReturn
+    from sales.returns import ReturnError, process_return
+    ctx = ctx or {}
+    if operation != 'create':
+        raise ValueError('A return can only be created.')
+    if SaleReturn.objects.filter(id=entity_id).exists():
+        return
+    sale = Sale.objects.select_for_update().filter(id=payload.get('sale_id'), shop=shop).first()
+    if sale is None:
+        raise _Skip()  # the sale has not arrived yet
+    user = ctx.get('user')
+    if not has_capability(user, 'process_return'):
+        raise ValueError("Your role can't take returns — ask an owner or manager.")
+    at = _parse_dt(payload.get('created_at'))
+    if at is not None and at > timezone.now() + MAX_CLIENT_CLOCK_AHEAD:
+        at = None
+    try:
+        process_return(
+            sale, payload.get('lines') or [], reason=payload.get('reason') or '',
+            refund_method=payload.get('refund_method') or 'cash', refund_amount=payload.get('refund_amount'),
+            user=user, actor_name=payload.get('actor') or None, source='till', device=ctx.get('device'),
+            return_id=entity_id, at=at, shift_ref=_uuid_or_none(payload.get('shift_id')),
+        )
+    except ReturnError as exc:
+        raise ValueError(str(exc))
 
 
 def _apply_sale_payment(shop, entity_id, operation, payload, ctx=None):
@@ -540,7 +643,8 @@ def _apply_stock_movement(shop, entity_id, operation, payload, ctx=None):
 # types once the cloud it talks to can apply them.
 #   2: sale_doc, sale_payment          3: shift, cash_movement
 #   4: stock_movement (damage, stock count) both ways
-SYNC_PROTOCOL = 4
+#   5: audit_event, mobile money payments, sale_return
+SYNC_PROTOCOL = 5
 
 _HANDLERS = {
     'product': _apply_product,
@@ -553,6 +657,8 @@ _HANDLERS = {
     'shift': _apply_shift,
     'cash_movement': _apply_cash_movement,
     'stock_movement': _apply_stock_movement,
+    'audit_event': _apply_audit_event,
+    'sale_return': _apply_sale_return,
 }
 
 # Same events a REST create/update/delete on the equivalent resource would
@@ -566,6 +672,7 @@ _EVENT_ENTITY = {
     'customer': 'customer', 'sale': 'sale', 'sale_item': 'saleitem',
     'sale_doc': 'sale', 'sale_payment': 'sale',
     'shift': 'shift', 'cash_movement': 'cashmovement', 'stock_movement': 'stockmovement',
+    'sale_return': 'sale', 'audit_event': 'auditlog',
 }
 _EVENT_VERB = {'create': 'created', 'update': 'updated', 'delete': 'deleted'}
 
@@ -793,7 +900,7 @@ class SyncPushView(APIView):
                 results.append({'id': op_id, 'status': 'rejected', 'error': str(exc)})
                 continue
 
-            if entity_type == 'sale_payment':
+            if entity_type in ('sale_payment', 'sale_return'):
                 event, changed_id = 'sale.updated', str(payload.get('sale_id'))
             else:
                 event = f'{_EVENT_ENTITY.get(entity_type, entity_type)}.{_EVENT_VERB.get(operation, operation)}'
@@ -862,6 +969,10 @@ def _serialize_stock_movement(o):
         'client_ref': str(o.client_ref) if o.client_ref else None,
         'source': o.source, 'created_at': o.created_at.isoformat(),
     }
+
+
+def _serialize_promotion(o):
+    return _promotion_as_dict(o)
 
 
 def _serialize_customer(o):
@@ -945,6 +1056,7 @@ class SyncPullView(APIView):
         'sale_item': (SaleItem, _serialize_sale_item),
         # After stock_batch, so a till always has the batch before a movement that names it.
         'stock_movement': (StockMovement, _serialize_stock_movement),
+        'promotion': (Promotion, _serialize_promotion),
     }
 
     def get(self, request):
@@ -978,7 +1090,8 @@ class SyncPullView(APIView):
             if model is Sale:
                 qs = qs.prefetch_related('payments').select_related('worker__user')
             if model is StockMovement:
-                qs = qs.filter(kind__in=TILL_APPLIED_MOVEMENT_KINDS)
+                # Units moved IN from another branch reach tills as new batches; only moves OUT apply.
+                qs = qs.filter(kind__in=TILL_APPLIED_MOVEMENT_KINDS).exclude(kind=StockMovement.TRANSFER, quantity__gt=0)
             if since:
                 qs = qs.filter(updated_at__gt=since)
             if index == start_type and cursor_at is not None:

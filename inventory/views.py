@@ -34,6 +34,25 @@ class InventoryItemViewSet(ShopScopedMixin, viewsets.ModelViewSet):
             return InventoryItemDetailSerializer
         return InventoryItemSerializer
 
+    AUDITED_FIELDS = ('name', 'sell_price', 'barcode', 'category', 'min_stock', 'unit')
+
+    def perform_update(self, serializer):
+        before = {f: getattr(serializer.instance, f) for f in self.AUDITED_FIELDS}
+        super().perform_update(serializer)
+        item = serializer.instance
+        diff = audit.changes(before, {f: getattr(item, f) for f in self.AUDITED_FIELDS}, self.AUDITED_FIELDS)
+        if diff:
+            action = 'product.price_changed' if 'sell_price' in diff else 'product.changed'
+            audit.record(action, shop=item.shop, user=self.request.user, target=item,
+                         summary=f'{item.name}: ' + ', '.join(f'{k} {a} -> {b}' for k, (a, b) in diff.items()),
+                         data={'changes': diff})
+
+    def perform_destroy(self, instance):
+        super().perform_destroy(instance)
+        audit.record('product.deleted', shop=instance.shop, user=self.request.user, target=instance,
+                     summary=f'Deleted product {instance.name} (price {instance.sell_price}, {instance.quantity} in stock)',
+                     data={'sell_price': str(instance.sell_price), 'quantity': instance.quantity})
+
     @action(detail=False, methods=['get'], url_path='by-barcode')
     def by_barcode(self, request):
         """GET /api/inventory/items/by-barcode/?code=<scanned value> — exact-match
@@ -260,3 +279,49 @@ class StockMovementViewSet(viewsets.ReadOnlyModelViewSet):
         if params.get('date_to'):
             qs = qs.filter(created_at__date__lte=params['date_to'])
         return qs.order_by('-created_at')
+
+
+class StockTransferViewSet(viewsets.ViewSet):
+    """GET/POST /api/inventory/transfers/ — moving stock between branches. The business's CEO only.
+
+    POST {from_branch, to_branch, lines: [{item, variant?, quantity}], note?}"""
+    permission_classes = [IsAuthenticated]
+
+    def _org(self, request):
+        from core.utils import get_organization_for_user
+        org = get_organization_for_user(request.user)
+        if org is None:
+            from rest_framework.exceptions import PermissionDenied
+            raise PermissionDenied('Only the business owner can move stock between branches.')
+        return org
+
+    def list(self, request):
+        from .models import StockTransfer
+        org = self._org(request)
+        rows = StockTransfer.objects.filter(organization=org).select_related('from_shop', 'to_shop') \
+            .prefetch_related('lines__from_item', 'lines__from_variant')[:200]
+        return Response([{
+            'id': str(t.id), 'created_at': t.created_at, 'from_branch': t.from_shop.name, 'to_branch': t.to_shop.name,
+            'note': t.note, 'actor_name': t.actor_name,
+            'lines': [{'item_name': l.from_item.name, 'variant': l.from_variant.label if l.from_variant_id else '',
+                       'quantity': l.quantity} for l in t.lines.all()],
+        } for t in rows])
+
+    def create(self, request):
+        from core.models import Shop
+        from .transfers import TransferError, transfer_stock
+        org = self._org(request)
+        from_shop = Shop.objects.filter(id=request.data.get('from_branch'), organization=org).first()
+        to_shop = Shop.objects.filter(id=request.data.get('to_branch'), organization=org).first()
+        if from_shop is None or to_shop is None:
+            return Response({'detail': 'Pick two branches of your business.'}, status=400)
+        try:
+            with transaction.atomic():
+                transfer = transfer_stock(org, from_shop, to_shop, request.data.get('lines') or [],
+                                          user=request.user, note=request.data.get('note') or '')
+        except TransferError as exc:
+            return Response({'detail': str(exc)}, status=400)
+        for shop in (from_shop, to_shop):
+            broadcast(shop, 'inventoryitem.updated', {'id': None})
+            broadcast(shop, 'stockbatch.created', {'id': None})
+        return Response({'id': str(transfer.id)}, status=201)

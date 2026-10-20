@@ -17,6 +17,7 @@ class Sale(SyncModel):
         ('cash', 'Cash'),
         ('transfer', 'Transfer'),
         ('pos', 'POS/Card'),
+        ('mobile', 'Mobile money'),
     ]
     STATUS_CHOICES = [
         ('completed', 'Completed'),
@@ -146,6 +147,10 @@ class SaleItem(SyncModel):
     unit_price = models.DecimalField(max_digits=12, decimal_places=2)
     unit_cost = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal('0.00'))
     discount = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal('0.00'))
+    promotion = models.ForeignKey(
+        'promotions.Promotion', on_delete=models.SET_NULL, null=True, blank=True, related_name='sale_items',
+        help_text='The promotion that set this line\'s discount (blank = no promotion / a manual discount).',
+    )
     tax_rate = models.DecimalField(max_digits=5, decimal_places=2, default=Decimal('0.00'), help_text='Percent, e.g. 7.5')
     stock_shortfall = models.PositiveIntegerField(
         default=0,
@@ -247,3 +252,46 @@ class SalePayment(SyncModel):
 
     def __str__(self):
         return f'{self.method} {self.amount} on sale {self.sale_id}'
+
+
+class SaleReturn(SyncModel):
+    """Items a customer brought back on a completed sale, and the money refunded.
+
+    A return is its OWN record: the original sale (its lines, payments and receipt) is never
+    rewritten. Reports subtract returns in the period they happen; the till's shift and day reports
+    count refunds by method, and a cash refund comes out of the drawer's expected cash.
+    Append-only. `id` is the till's id when it was recorded on a till, so a re-send is recognised.
+    """
+    sale = models.ForeignKey(Sale, on_delete=models.CASCADE, related_name='returns')
+    returned_at = models.DateTimeField(default=timezone.now, db_index=True)
+    reason = models.CharField(max_length=255)
+    refund_method = models.CharField(max_length=20, choices=SalePayment.METHOD_CHOICES, default='cash')
+    refund_amount = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal('0.00'))
+    total_value = models.DecimalField(
+        max_digits=12, decimal_places=2, default=Decimal('0.00'),
+        help_text='What the returned items were sold for (after their share of any discount).',
+    )
+    total_cost = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal('0.00'))
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name='+')
+    actor_name = models.CharField(max_length=150, blank=True)
+    source = models.CharField(max_length=10, default='web')
+    device = models.ForeignKey('devices.Device', on_delete=models.SET_NULL, null=True, blank=True, related_name='+')
+    shift_ref = models.UUIDField(null=True, blank=True)
+
+    class Meta:
+        ordering = ['-returned_at']
+
+    def __str__(self):
+        return f'Return of {self.total_value} on sale {self.sale_id}'
+
+
+class SaleReturnLine(models.Model):
+    sale_return = models.ForeignKey(SaleReturn, on_delete=models.CASCADE, related_name='lines')
+    sale_item = models.ForeignKey(SaleItem, on_delete=models.CASCADE, related_name='return_lines')
+    quantity = models.PositiveIntegerField()
+    value = models.DecimalField(max_digits=12, decimal_places=2)
+    cost = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal('0.00'))
+    restocked = models.BooleanField(default=True, help_text='False = damaged/unsellable: written off, not put back.')
+
+    def __str__(self):
+        return f'{self.quantity} x {self.sale_item.item_name}'

@@ -26,3 +26,13 @@ def record(action, *, shop=None, organization=None, user=None, target=None, targ
         source=source,
         device=device,
     )
+
+
+def changes(before, after, fields):
+    """{'field': [before, after]} for the fields that actually changed (values as strings)."""
+    out = {}
+    for f in fields:
+        a, b = before.get(f), after.get(f)
+        if str(a) != str(b):
+            out[f] = [None if a is None else str(a), None if b is None else str(b)]
+    return out

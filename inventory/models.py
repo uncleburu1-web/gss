@@ -351,3 +351,32 @@ class StockMovement(models.Model):
 
     def delete(self, *args, **kwargs):
         raise ValueError('Stock movements are append-only.')
+
+
+class StockTransfer(models.Model):
+    """Stock moved from one branch to another of the same business, by its CEO. Immediate: the
+    source branch loses the units (TRANSFER movements out, earliest expiry first) and the destination
+    gains matching batches (same cost and expiry) in one transaction. Append-only."""
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    organization = models.ForeignKey('core.Organization', on_delete=models.CASCADE, related_name='stock_transfers')
+    from_shop = models.ForeignKey('core.Shop', on_delete=models.CASCADE, related_name='transfers_out')
+    to_shop = models.ForeignKey('core.Shop', on_delete=models.CASCADE, related_name='transfers_in')
+    note = models.CharField(max_length=255, blank=True)
+    user = models.ForeignKey('auth.User', on_delete=models.SET_NULL, null=True, blank=True, related_name='+')
+    actor_name = models.CharField(max_length=150, blank=True)
+    created_at = models.DateTimeField(default=timezone.now, db_index=True)
+
+    class Meta:
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f'Transfer {self.from_shop_id} -> {self.to_shop_id}'
+
+
+class StockTransferLine(models.Model):
+    transfer = models.ForeignKey(StockTransfer, on_delete=models.CASCADE, related_name='lines')
+    from_item = models.ForeignKey(InventoryItem, on_delete=models.CASCADE, related_name='+')
+    to_item = models.ForeignKey(InventoryItem, on_delete=models.CASCADE, related_name='+')
+    from_variant = models.ForeignKey(ItemVariant, on_delete=models.SET_NULL, null=True, blank=True, related_name='+')
+    to_variant = models.ForeignKey(ItemVariant, on_delete=models.SET_NULL, null=True, blank=True, related_name='+')
+    quantity = models.PositiveIntegerField()
