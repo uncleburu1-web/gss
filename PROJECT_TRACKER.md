@@ -1,7 +1,7 @@
 # Benchline project tracker
 
 The single source of truth for where Benchline stands. A new session should be able to resume from
-this file alone. Last updated **21 Oct 2026**.
+this file alone. Last updated **21 Oct 2026 (night)**.
 
 | Detail | Where |
 | --- | --- |
@@ -31,9 +31,25 @@ commercial business-management platform:
 release is held:** the v1.0.22 release check found a stock bug (FIX-01, gssdesktop PR #5). The next
 till build (v1.0.23) is published once that PR is merged and the checklist passes (OPS-01).
 
-**Restaurant (Parts 7–14):** requirements and design reviewed and merged (gss PR #7). Building has
-started on the `restaurant` branches: configuration, packages and permissions first, then kitchen
-routing. Nothing restaurant-related deploys until the complete workflow passes (REST-09).
+**Restaurant (Parts 7–14):** requirements and design reviewed and merged (gss PR #7). On the
+`restaurant` branches, these are merged:
+- configuration, packages and permissions (gss PR #8);
+- kitchen routing (gssdesktop PR #6).
+
+These are in review:
+- the shared bill engine (gss PR #10);
+- the hub's order engine and kitchen printing (gssdesktop PR #7).
+
+A full table-service order already runs on a hub till with the server switched off, and its bill
+matches the cloud's to the kobo (end-to-end test against a real server).
+
+Still to build:
+- the hub's screens;
+- the Wi-Fi kitchen screen;
+- the cloud receiving closed orders;
+- the web set-up screens.
+
+Nothing restaurant-related deploys until the complete workflow passes (REST-09).
 
 Milestones, as the brief defines them:
 
@@ -43,8 +59,8 @@ Milestones, as the brief defines them:
 | Core engine stages 0–11, web | Yes | Yes | E2E scripts only | Yes | Deployed by Cloudflare on merge; **stage 11 deploy not checked** |
 | Core engine stages 0–11, phone | Yes | Yes | E2E scripts only (shared with web) | Yes | APK built 21 Oct; **install on devices not verified** |
 | Core engine stages 0–11, till | Yes | Yes | Yes (137/137 with FIX-01; two-till E2E incl. outage) | Yes | **Pending:** v1.0.23 passed its checklist; the owner publishes it (OPS-01) |
-| Branch modules and packages | Yes | Yes (`restaurant` branch, PR #8) | Yes (26 tests; full suite 292/292) | No | No |
-| Restaurant | Yes | Configuration + routing (PR #8, gssdesktop PR #6) | Partly | No | No |
+| Branch modules and packages | Yes | Yes (`restaurant` branch, PR #8 merged) | Yes (full suite 292/292; again in the restaurant E2E) | On `restaurant` | No |
+| Restaurant | Yes | Configuration, routing, bill engine, hub order engine, kitchen printing (gss #8 #10, gssdesktop #6 #7) | Engine yes (till 173/173; real-server E2E 18/18). Screens, LAN, cloud ingest not built | No | No |
 
 ## 3. Task board
 
@@ -61,16 +77,18 @@ A task is `COMPLETED` only with evidence recorded.
 | OPS-05 | Confirm stage 11 is live on web | gssfrontend | `main` | NOT_STARTED | — | `pos.gssolu.com` shows the "Sold by weight" option in Inventory | Manual check | — | — | Open Inventory → Add item |
 | REST-02 | Restaurant requirements (brief stage 5) | gss | PR #7 | COMPLETED | Owner decisions 21 Oct | Workflows, rules, tax/charges with sources, acceptance criteria | — | `docs/restaurant/REQUIREMENTS.md`; owner instructed review + merge (decision 9) | — | — |
 | DOC-02 | Review of the restaurant design (PR #7) | gss | `design/restaurant-foundation` | COMPLETED | REST-03 | Full diff checked against the owner's list; issues fixed | Link check of every document | 14 issues fixed (session log, 21 Oct evening) | — | Merge |
-| CORE-13 | Packages (`Package`, `Subscription.package`, feature checks) | gss, clients | `restaurant-config` (PR #8 → `restaurant`) | REVIEW_REQUIRED | CORE-12 | Existing subscriptions unchanged (Retail); module switch-on needs the feature | Django tests | Package model, starter packages, trial = all features | Add-on price (billing only) | — |
+| CORE-13 | Packages (`Package`, `Subscription.package`, feature checks) | gss, clients | `restaurant` (PR #8 merged) | TESTING | CORE-12 | Existing subscriptions unchanged (Retail); module switch-on needs the feature | Django tests | Package model, starter packages, trial = all features; owner merged PR #8; used again by the restaurant E2E (21 Oct) | Add-on price (billing only) | Final check in REST-09 |
 | REST-10 | Link stocked menu items (bottled drinks) and recipes to stock | gss, gssdesktop | — | DEFERRED | REST-09 | Restaurant sales move stock for linked items | — | First release moves no stock (DOMAIN_MODEL §1) | — | — |
 | REST-03 | Restaurant architecture (brief stage 6) | gss | PR #7 | COMPLETED | REST-02 | Domain model, state transitions T1–T13, kitchen workflow, offline sync, events, API | — | `TARGET_ARCHITECTURE.md` + six `docs/restaurant/` documents; reviewed (DOC-02) | — | — |
-| CORE-12 | Branch modules (`BranchModule`, `RequiresModule`, `/api/me` modules) | gss, all clients | `restaurant-config` (PR #8 → `restaurant`) | REVIEW_REQUIRED | REST-03 | Existing branches unchanged (retail, + service where enabled); a branch without `restaurant` gets 403 `module_disabled` | Django tests incl. cross-business isolation | BranchModule + endpoint + `/api/me`; 26 restaurant tests; full suite 292/292 | — | — |
-| REST-04 | Cloud: restaurant configuration models + API + pull types | gss | `restaurant-config` (PR #8 → `restaurant`) | REVIEW_REQUIRED | CORE-12, CORE-13 | Owner can set up menu, modifiers, tables, stations, taxes, service charge; tenant-isolated; audited | Django tests per endpoint, permission and isolation | Configuration API, tax activation safeguards, opt-in pull types | — | — |
-| REST-05 | Shared tax / service-charge engine (JS + Python, shared vectors) | gss, gssdesktop | — | NOT_STARTED | REST-04 | Identical results in both languages, incl. the Lagos example in REQUIREMENTS §4 | Shared vectors | — | — | — |
-| REST-06 | Hub order engine T1–T13 + kitchen printing | gssdesktop | `restaurant-routing` (gssdesktop PR #6 → `restaurant`) | IN_PROGRESS | REST-05 | Table-service workflow on the hub, tickets printed per station, everything offline | Till tests per transition, idempotency, restart | Kitchen routing done (JS = Python, shared cases); order engine next | — | — |
-| REST-07 | Hub local server, screen pairing, kitchen screen (SSE) | gssdesktop | — | NOT_STARTED | REST-06 | Screen shows and updates tickets live; catches up after a Wi-Fi drop; station isolation | Two-device LAN E2E | — | — | — |
-| REST-08 | Cloud ingest (`order_doc`), `Sale` on close, restaurant reports | gss, gssdesktop | — | NOT_STARTED | REST-06 | A closed order arrives once with matching totals; Z-report and reports include it | Sync tests + E2E | — | — | — |
-| REST-09 | Restaurant verification and release readiness (brief stages 9–10) | all | — | NOT_STARTED | REST-07, REST-08 | Acceptance criteria 1–10 in REQUIREMENTS §5 | Full workflow online, offline, with restarts | — | — | — |
+| CORE-12 | Branch modules (`BranchModule`, `RequiresModule`, `/api/me` modules) | gss, all clients | `restaurant` (PR #8 merged) | TESTING | REST-03 | Existing branches unchanged (retail, + service where enabled); a branch without `restaurant` gets 403 `module_disabled` | Django tests incl. cross-business isolation | BranchModule + endpoint + `/api/me`; full suite 292/292; restaurant E2E switches it on through the API and a supermarket till never asks for restaurant data | — | Final check in REST-09 |
+| REST-04 | Cloud: restaurant configuration models + API + pull types | gss | `restaurant` (PR #8 merged) | TESTING | CORE-12, CORE-13 | Owner can set up menu, modifiers, tables, stations, taxes, service charge; tenant-isolated; audited | Django tests per endpoint, permission and isolation | Configuration API, tax activation safeguards, opt-in pull types; restaurant E2E sets a whole restaurant up through it and the hub pulls it | — | Web set-up screens (REST-12) |
+| REST-05 | Shared tax / service-charge engine (JS + Python, shared vectors) | gss, gssdesktop | gss `restaurant-billing` (PR #10), gssdesktop `restaurant-engine` (PR #7) | REVIEW_REQUIRED | REST-04 | Identical results in both languages, incl. the Lagos example in REQUIREMENTS §4 | 15 shared hand-computed vectors in both languages | Lagos example ₦58,800 in both; real-server E2E: hub bill = Python bill line for line (₦11,162.50); per-rule `applies_to_service_charge` replaces the conflicting global flag (migration `restaurant 0002`); gss restaurant 28/28, full suite 294/294 (with `modules` in every pull) | — | Owner reviews PR #10 and gssdesktop PR #7 |
+| REST-06 | Hub order engine T1–T13 + kitchen printing | gssdesktop | `restaurant-engine` (PR #7 → `restaurant`) | REVIEW_REQUIRED | REST-05 | Table-service workflow on the hub, tickets printed per station, everything offline | Till tests per transition, idempotency, restart | Till 173/173. Real-server E2E 18/18 with the server stopped during service. Only the branch's hub runs the restaurant (second till refused); restaurant audit entries wait on the hub for protocol 6 (today's cloud refused them). Printing tested with a stand-in window only: **no physical thermal printer tried yet** | Physical printer test needs the shop's hardware | Owner reviews PR #7; printer test in REST-09 |
+| REST-07 | Hub local server, screen pairing, kitchen screen (SSE) | gssdesktop | — | NOT_STARTED | REST-06 | Screen shows and updates tickets live; catches up after a Wi-Fi drop; station isolation | Two-device LAN E2E | Engine already keeps the event log (`r_events`) and per-station views the server will serve | — | Next to build |
+| REST-08 | Cloud ingest (`order_doc`), `Sale` on close, restaurant reports | gss, gssdesktop | — | NOT_STARTED | REST-06 | A closed order arrives once with matching totals; Z-report and reports include it | Sync tests + E2E | Hub side done: closed orders wait on the hub until the cloud speaks protocol 6 (E2E checks nothing is sent at 5) | — | Cloud side: protocol 6, verify from frozen lines, `Sale(source='restaurant')`, taxes-collected report |
+| REST-09 | Restaurant verification and release readiness (brief stages 9–10) | all | — | NOT_STARTED | REST-07, REST-08, REST-11, REST-12 | Acceptance criteria 1–10 in REQUIREMENTS §5 | Full workflow online, offline, with restarts; physical kitchen printer | — | — | — |
+| REST-11 | Hub restaurant screens: tables, order pad with modifiers, send, bill, payment, kitchen printers | gssdesktop | — | NOT_STARTED | REST-06 | A waiter/cashier runs table service and counter orders on the hub without training notes | Browser-driven E2E on the packaged app | Engine and IPC ready (`window.pos.restaurant(...)`) | — | After REST-07 |
+| REST-12 | Web set-up screens for the restaurant (menu, modifiers, tables, stations, taxes, service charge, hub) | gssfrontend, gssandriod | — | NOT_STARTED | REST-04 | Owner sets a restaurant up without the API | Web E2E | API ready (REST-04) | — | — |
 | QA-01 | Run web E2E in CI | gssfrontend | — | NOT_STARTED | — | Every PR runs the browser E2E against a throwaway Postgres | CI | — | — | — |
 | QA-02 | Tests for Paystack payments and repairs | gss | — | NOT_STARTED | — | Paystack success/failure/duplicate webhook and repair flows covered | Django tests | `repairs/tests.py` has 0 tests | — | — |
 | QA-03 | CI check that shared JS files are identical in every repo | all | — | NOT_STARTED | — | A PR that changes `promotions.js` (later `tax.js`) in one repo only fails | CI | Decision 2 | — | — |
@@ -131,6 +149,7 @@ scripts in `gssdesktop/e2e/` and `gssfrontend/e2e/`.
 | Stage 8–9 | `SaleReturn`, `SaleReturnLine`; `StockTransfer`, `StockTransferLine` |
 | Stage 10 | `Promotion` |
 | Stage 11 | `InventoryItem.sold_by_weight`; quantity columns → `Decimal(12,3)` (`inventory 0010`, `repairs 0003`, `sales 0012`) |
+| `restaurant` branch only (not on `main`, not deployed) | `core 0010–0011` `BranchModule` (+ data: every branch gets retail, gadgets shops also service); `subscriptions 0003–0004` `Package`, `Subscription.package`; `staff 0004` cashier/waiter/kitchen roles; `restaurant 0001` configuration models; `restaurant 0002` drops `RestaurantSettings.service_charge_taxable` (never released; replaced by the per-rule flag) |
 
 No migration has dropped data. Backups before releases are manual `pg_dump` (Railway plan has none).
 
@@ -140,6 +159,10 @@ No migration has dropped data. Backups before releases are manual `pg_dump` (Rai
 `stock_movements`, `stock_docs` (stage 4); `sale_returns`, `sale_return_lines` (stage 8);
 `promotions` (stage 10); `products.sold_by_weight` (stage 11). Each is checked on a copy of the
 shop's real till database before release (`tools/check-upgrade-on-copy.js`, SAFE on 20 Oct).
+
+Restaurant (`restaurant` branch only): its own `r_*` tables from `src/main/restaurant/schema.sql`,
+created with `CREATE TABLE IF NOT EXISTS` on every open and empty on supermarket tills. No existing
+table is changed; the upgrade check on the real till copy was SAFE with them in place (21 Oct).
 
 ### API
 
@@ -157,6 +180,10 @@ ONLINE/STALE/OFFLINE.
 
 Version 5. Op types: `product`, `stock_batch`, `customer`, `sale`, `sale_item`, `sale_doc`,
 `sale_payment`, `shift`, `cash_movement`, `stock_movement`, `audit_event`, `sale_return`.
+
+Planned 6 (REST-08): `order_doc`, a closed restaurant order in one piece. The hub already holds
+closed orders until the cloud reports 6 and then queues them (`reconcileOrders`). Restaurant
+configuration comes down as opt-in pull types, asked for by name, only on restaurant branches.
 
 ## 6. Roadmap (owner's order, 21 Oct 2026)
 
@@ -271,3 +298,28 @@ workflow passes (REST-09).
 - **Bug caught by the tests:** a duplicate name returned a 500 (database constraint); now a clear 400.
 - **Next:** owner publishes v1.0.23 and reviews gss PR #8 and gssdesktop PR #6; then the hub order
   engine (T1–T13) on the `restaurant` branch, then kitchen printing.
+
+### 21 Oct 2026 (night) — bill engine, hub order engine, kitchen printing
+
+- **Built (not deployed, `restaurant` branches):**
+  - The bill engine in Python and JavaScript (gss PR #10, gssdesktop PR #7).
+  - The hub's order engine T1–T13.
+  - Kitchen ticket printing, with a printer per station on the hub PC.
+  - The hub's IPC channel.
+  - The restaurant part of the till's pull.
+- **Tests run (actual):**
+  - Unit tests: gss `restaurant` 28/28, full suite 294/294; gssdesktop 173/173.
+  - New end-to-end script `gssdesktop/e2e/restaurant-hub.cjs`, against a real server on freshly seeded Postgres: 18/18. The owner sets up a restaurant through the API. The hub pulls it. With the server stopped, the hub runs a full table-service order: two stations, modifiers, a retried send, the kitchen screen, serving, the bill, cash payment and close. The bill equals the cloud's Python engine charge for charge (₦11,162.50). A cloud price change during service leaves the open order alone. The Z-report counts the cash. The till learns about the restaurant from the pull without a new sign-in, refuses work until the owner picks a hub, and a second till in the branch is refused.
+  - Supermarket regression on the same server and code: `till-e2e` 15/15, `till-outage` all passed. The real-till upgrade check was SAFE.
+- **Bugs caught before merge:**
+  1. The print queue's "already running" guard could stick and silently stop kitchen printing. A unit test caught it; the queue is now single-flight and runs again when a job arrives mid-run.
+  2. Restaurant rows that would not apply were not counted in the sync status. Found in review; they are now counted, with a new test.
+  3. A global "service charge is taxable" flag conflicted with the per-tax-rule setting. Removed.
+  4. Nothing stopped a second till in a restaurant branch from taking orders, which would have split the open tables. Only the hub the owner picked runs the restaurant now.
+  5. The hub uploaded restaurant audit entries that today's cloud refuses. On the real server, a sold-out switch and a reprint left 2 failed uploads for ever. They are now kept on the hub until the cloud speaks protocol 6. The end-to-end check fails on the old code and passes on the new.
+  6. A till only learned that the restaurant was switched on at its next sign-in. Every pull now carries the branch's modules.
+- **Not verified:** printing on a physical thermal printer (needs the shop's hardware; part of REST-09).
+- **Next:**
+  - The owner publishes v1.0.23 and reviews gss PR #10 and gssdesktop PR #7.
+  - Then REST-07: hub local server, kitchen screen over the Wi-Fi.
+  - Then REST-08 (cloud receives closed orders) and the screens (REST-11, REST-12).
