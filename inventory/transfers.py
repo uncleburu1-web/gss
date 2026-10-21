@@ -70,7 +70,7 @@ def transfer_stock(organization, from_shop, to_shop, lines, *, user, note=''):
             variant = item.variants.filter(id=line.get('variant'), is_deleted=False).first()
             if variant is None:
                 raise TransferError(f'{item.name} has sizes/colours — say which one to move.')
-        qty = ledger._whole(line.get('quantity'), 'Quantity')
+        qty = ledger.check_quantity(item, line.get('quantity'), 'Quantity')
         if qty <= 0:
             raise TransferError('Quantities must be more than zero.')
         batches = StockBatch.objects.select_for_update().filter(item=item, is_deleted=False, quantity_remaining__gt=0)

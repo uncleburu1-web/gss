@@ -7,6 +7,8 @@ def record(action, *, shop=None, organization=None, user=None, target=None, targ
     from inventory.ledger import actor_name_for
     from .models import AuditLog
 
+    from core.utils import json_safe
+    data = json_safe(data or {})  # Decimal/UUID/dates -> JSON-safe
     if target is not None:
         target_type = target_type or target._meta.model_name
         target_id = target_id or str(target.pk)

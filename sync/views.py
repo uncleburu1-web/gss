@@ -11,6 +11,7 @@ correctly treats as "still offline," so it just quietly kept the queue
 contract — same request/response shape sync.js already sends and expects.
 """
 import hashlib
+from decimal import Decimal
 import json
 import uuid
 from datetime import timedelta, timezone as dt_timezone
@@ -98,6 +99,8 @@ def _apply_product(shop, entity_id, operation, payload, ctx=None):
         'sell_price': payload.get('sell_price') or 0,
         'min_stock': payload.get('min_stock') if payload.get('min_stock') is not None else 2,
     }
+    if 'sold_by_weight' in payload:  # only when the till knows about weighed products
+        defaults['sold_by_weight'] = bool(payload.get('sold_by_weight'))
     # image_url is deliberately only touched when the payload actually
     # names it. It's real product data (see InventoryItem.image_url) and
     # `image_url: null` IS a valid, expected value for a product with no
@@ -146,8 +149,8 @@ def _apply_stock_batch(shop, entity_id, operation, payload, ctx=None):
     defaults = {
         'item': item,
         'batch_number': payload.get('batch_number') or '',
-        'quantity_received': payload.get('quantity_received') or 0,
-        'quantity_remaining': payload.get('quantity_remaining') or 0,
+        'quantity_received': _qty(payload.get('quantity_received')),
+        'quantity_remaining': _qty(payload.get('quantity_remaining')),
         'cost_price': payload.get('cost_price') or 0,
         'selling_price': selling_price,
         'expiry_date': payload.get('expiry_date') or None,
@@ -270,7 +273,7 @@ def _apply_sale_item(shop, entity_id, operation, payload, ctx=None):
         'item': item,
         'item_name': payload.get('item_name', ''),
         'category': payload.get('category') or '',
-        'quantity': payload.get('quantity') or 1,
+        'quantity': _qty(payload.get('quantity'), 1),
         'unit_price': payload.get('unit_price') or 0,
         'discount': payload.get('discount') or 0,
     }
@@ -287,6 +290,13 @@ def _apply_sale_item(shop, entity_id, operation, payload, ctx=None):
 
     if sale.status == 'completed':
         apply_legacy_amount_paid(sale, sale.total)
+
+
+def _qty(value, default=0):
+    """A quantity from a till (a float for kg) as an exact 3-decimal Decimal."""
+    if value in (None, ''):
+        value = default
+    return Decimal(str(value)).quantize(Decimal('0.001'))
 
 
 def _uuid_or_none(value):
@@ -383,7 +393,7 @@ def _apply_sale_doc(shop, entity_id, operation, payload, ctx=None):
         sale_item = SaleItem.objects.create(
             id=line['id'], shop=shop, sale=sale, item=item,
             item_name=line.get('item_name', ''), category=line.get('category') or '',
-            quantity=line.get('quantity') or 1, unit_price=line.get('unit_price') or 0,
+            quantity=_qty(line.get('quantity'), 1), unit_price=line.get('unit_price') or 0,
             discount=line.get('discount') or 0, promotion=promotion,
         )
         if item is not None:
@@ -618,7 +628,7 @@ def _apply_stock_movement(shop, entity_id, operation, payload, ctx=None):
     kind = payload.get('kind')
     if kind == 'damage':
         available = ledger.on_hand(item, variant)
-        wanted = ledger._whole(payload.get('quantity') or 0, 'Quantity')
+        wanted = ledger.check_quantity(item, payload.get('quantity') or 0, 'Quantity')
         quantity = min(wanted, available)
         if quantity <= 0:
             return  # nothing left on the cloud's side to write off
@@ -926,7 +936,7 @@ def _serialize_product(o):
     return {
         'id': str(o.id), 'name': o.name, 'short_code': o.short_code, 'barcode': o.barcode,
         'category': o.category, 'unit': o.unit,
-        'sell_price': str(o.sell_price), 'min_stock': o.min_stock,
+        'sell_price': str(o.sell_price), 'min_stock': o.min_stock, 'sold_by_weight': o.sold_by_weight,
         # Always included (even as null) -- this is a full snapshot pull,
         # not a partial patch, so a product whose image was removed (or
         # never had one) correctly clears/stays clear on every pulling

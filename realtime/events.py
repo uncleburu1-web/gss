@@ -58,7 +58,10 @@ def broadcast(shop, event_type, payload):
     'product.created', 'customer.updated'. `payload` should be small and
     JSON-safe — a hint for the UI (e.g. which product changed), not a
     full authoritative record; the client re-fetches for the real data.
+    Decimals, UUIDs and dates are turned into JSON-safe values here.
     """
+    from core.utils import json_safe
+    payload = json_safe(payload)
     def _send():
         # Imported here rather than at module level purely to keep this
         # module importable before app-loading finishes in places like

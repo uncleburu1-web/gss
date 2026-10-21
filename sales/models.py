@@ -143,7 +143,7 @@ class SaleItem(SyncModel):
     item_name = models.CharField(max_length=200, help_text='Snapshot of the item/service name at time of sale')
     variant_label = models.CharField(max_length=100, blank=True, help_text='Snapshot of the variant (e.g. "Medium / Blue") at time of sale')
     category = models.CharField(max_length=30, blank=True, help_text='Snapshot of item category at time of sale')
-    quantity = models.PositiveIntegerField(default=1)
+    quantity = models.DecimalField(max_digits=12, decimal_places=3, default=1)  # kg for a product sold by weight
     unit_price = models.DecimalField(max_digits=12, decimal_places=2)
     unit_cost = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal('0.00'))
     discount = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal('0.00'))
@@ -152,7 +152,7 @@ class SaleItem(SyncModel):
         help_text='The promotion that set this line\'s discount (blank = no promotion / a manual discount).',
     )
     tax_rate = models.DecimalField(max_digits=5, decimal_places=2, default=Decimal('0.00'), help_text='Percent, e.g. 7.5')
-    stock_shortfall = models.PositiveIntegerField(
+    stock_shortfall = models.DecimalField(max_digits=12, decimal_places=3, 
         default=0,
         help_text='How many of `quantity` could NOT be matched to real stock batches at allocation time — '
                    '0 means the sale is fully backed by tracked stock. Non-zero means two tills (or a till '
@@ -200,7 +200,7 @@ class SaleAllocation(SyncModel):
     of guessing."""
     sale_item = models.ForeignKey(SaleItem, on_delete=models.CASCADE, related_name='allocations')
     batch = models.ForeignKey('inventory.StockBatch', on_delete=models.SET_NULL, null=True, related_name='allocations')
-    quantity = models.PositiveIntegerField()
+    quantity = models.DecimalField(max_digits=12, decimal_places=3)
 
     def __str__(self):
         return f'{self.sale_item_id} -> batch {self.batch_id}: {self.quantity}'
@@ -288,7 +288,7 @@ class SaleReturn(SyncModel):
 class SaleReturnLine(models.Model):
     sale_return = models.ForeignKey(SaleReturn, on_delete=models.CASCADE, related_name='lines')
     sale_item = models.ForeignKey(SaleItem, on_delete=models.CASCADE, related_name='return_lines')
-    quantity = models.PositiveIntegerField()
+    quantity = models.DecimalField(max_digits=12, decimal_places=3)
     value = models.DecimalField(max_digits=12, decimal_places=2)
     cost = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal('0.00'))
     restocked = models.BooleanField(default=True, help_text='False = damaged/unsellable: written off, not put back.')

@@ -69,15 +69,30 @@ def on_hand(item, variant=None):
     return qs.aggregate(t=models.Sum('quantity_remaining'))['t'] or 0
 
 
-def _whole(quantity, label):
-    """Batch columns hold whole units today (weighed selling is not switched on)."""
+THOUSANDTH = Decimal('0.001')
+
+
+def check_quantity(item, quantity, label='Quantity'):
+    """The one quantity rule: a product sold by weight takes kg to the gram (3 decimals); every other
+    product (and a line with no product) takes whole units only. Returns a Decimal."""
     try:
         value = Decimal(str(quantity))
     except Exception:
         raise LedgerError(f'{label} must be a number.')
+    if not value.is_finite():
+        raise LedgerError(f'{label} must be a number.')
+    if getattr(item, 'sold_by_weight', False):
+        if value != value.quantize(THOUSANDTH):
+            raise LedgerError(f'{label} can have at most 3 decimals (grams).')
+        return value.quantize(THOUSANDTH)
     if value != value.to_integral_value():
         raise LedgerError(f'{label} must be a whole number for this product.')
-    return int(value)
+    return value.quantize(THOUSANDTH)
+
+
+def _whole(quantity, label, item=None):
+    """Kept for callers that have no product at hand: whole units."""
+    return check_quantity(item, quantity, label)
 
 
 def _take_fefo(item, variant, quantity, kind, **record_kwargs):
@@ -102,7 +117,7 @@ def record_damage(shop, item, quantity, reason, *, variant=None, user=None, sour
     reason = (reason or '').strip()
     if not reason:
         raise LedgerError('Say why the stock is damaged — a reason is required.')
-    qty = _whole(quantity, 'Quantity')
+    qty = check_quantity(item, quantity, 'Quantity')
     if qty <= 0:
         raise LedgerError('Quantity must be more than zero.')
     available = sum(b.quantity_remaining for b in _live_batches(item, variant))
@@ -123,7 +138,7 @@ def record_stock_count(shop, item, counted, reason, *, variant=None, user=None, 
     reason = (reason or '').strip()
     if not reason:
         raise LedgerError('Say why the count differs — a reason is required.')
-    counted_qty = _whole(counted, 'Counted quantity')
+    counted_qty = check_quantity(item, counted, 'Counted quantity')
     if counted_qty < 0:
         raise LedgerError('Counted quantity cannot be negative.')
     batches = list(_live_batches(item, variant))
@@ -168,7 +183,7 @@ def drift(shop=None):
         if ledger != expected:
             problems.append({
                 'batch_id': str(batch.id), 'item_id': str(batch.item_id), 'item_name': batch.item.name,
-                'shop_id': str(batch.shop_id), 'quantity_remaining': int(expected),
+                'shop_id': str(batch.shop_id), 'quantity_remaining': str(expected.quantize(Decimal('0.001'))),
                 'ledger_total': str(Decimal(ledger).quantize(Decimal('0.001'))),
                 'difference': str((expected - ledger).quantize(Decimal('0.001'))),
             })

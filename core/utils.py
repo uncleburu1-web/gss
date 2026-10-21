@@ -144,3 +144,20 @@ def user_may_use_branch_device(user, device_shop):
         return True
     worker = getattr(user, 'worker', None)
     return bool(worker is not None and worker.shop_id == device_shop.id)
+
+
+def json_safe(value):
+    """`value` with Decimals as plain numbers (2, 1.25), UUIDs/dates as strings — safe for JSON
+    columns and realtime messages. Whole quantities stay whole numbers, so payloads look as before."""
+    import json
+    from decimal import Decimal
+
+    from django.core.serializers.json import DjangoJSONEncoder
+
+    class _Encoder(DjangoJSONEncoder):
+        def default(self, o):
+            if isinstance(o, Decimal):
+                return int(o) if o == o.to_integral_value() else float(o)
+            return super().default(o)
+
+    return json.loads(json.dumps(value, cls=_Encoder))

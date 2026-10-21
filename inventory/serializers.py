@@ -25,6 +25,8 @@ class ItemVariantSerializer(serializers.ModelSerializer):
 
 
 class StockBatchSerializer(serializers.ModelSerializer):
+    quantity_received = serializers.DecimalField(max_digits=12, decimal_places=3, coerce_to_string=False)
+    quantity_remaining = serializers.DecimalField(max_digits=12, decimal_places=3, coerce_to_string=False, read_only=True)
     supplier_display = serializers.SerializerMethodField()
     is_expiring_soon = serializers.ReadOnlyField()
     is_expired = serializers.ReadOnlyField()
@@ -55,6 +57,12 @@ class StockBatchSerializer(serializers.ModelSerializer):
 
     def validate(self, attrs):
         item = attrs.get('item') or getattr(self.instance, 'item', None)
+        if 'quantity_received' in attrs:
+            from .ledger import LedgerError, check_quantity
+            try:
+                attrs['quantity_received'] = check_quantity(item, attrs['quantity_received'], 'Quantity received')
+            except LedgerError as exc:
+                raise serializers.ValidationError({'quantity_received': str(exc)})
         variant = attrs.get('variant', getattr(self.instance, 'variant', None))
         if item is not None and item.has_variants and variant is None:
             raise serializers.ValidationError({
@@ -101,7 +109,7 @@ class StockBatchSerializer(serializers.ModelSerializer):
                           reason='Received quantity corrected', reference=('stock_batch', batch.id))
             audit.record('stock.receipt_corrected', shop=batch.shop, user=self._ledger_user(), target=batch,
                          summary=f'Changed received quantity of {batch.item.name} batch {batch.batch_number} '
-                                 f'by {delta:+d}', data={'delta': delta})
+                                 f'by {delta:+}', data={'delta': delta})
             return batch
         return super().update(instance, validated_data)
 
@@ -118,7 +126,7 @@ class InventoryItemSerializer(serializers.ModelSerializer):
         model = InventoryItem
         fields = [
             'id', 'name', 'short_code', 'barcode', 'category', 'brand', 'unit', 'spec',
-            'quantity', 'min_stock', 'prescription_required', 'cost_price', 'sell_price', 'is_low_stock',
+            'quantity', 'min_stock', 'sold_by_weight', 'prescription_required', 'cost_price', 'sell_price', 'is_low_stock',
             'stock_value', 'batch_count', 'has_variants', 'image_url', 'created_at', 'updated_at',
         ]
         # image_url is read-only here on purpose -- it's only ever set via

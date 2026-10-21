@@ -133,7 +133,7 @@ class RepairPart(SyncModel):
     """
     ticket = models.ForeignKey(RepairTicket, on_delete=models.CASCADE, related_name='parts_used')
     item = models.ForeignKey('inventory.InventoryItem', on_delete=models.PROTECT, related_name='used_in_repairs')
-    quantity = models.PositiveIntegerField(default=1)
+    quantity = models.DecimalField(max_digits=12, decimal_places=3, default=1)
     unit_cost = models.DecimalField(
         max_digits=12, decimal_places=2, default=0,
         help_text='Weighted-average batch cost at the moment the part was taken — frozen here so it never '
