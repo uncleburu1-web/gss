@@ -16,6 +16,7 @@ from core.models import Shop, Organization, EmailOTP
 from core.permissions import is_ceo, IsCeo
 from core.capabilities import capabilities_for_user, effective_role_permissions, CAPABILITIES, CONFIGURABLE_ROLES
 from core.utils import get_shop_for_user, get_shops_for_user, get_organization_for_user
+from core.modules import branch_modules, organization_features
 from core.auth_serializers import DeviceAwareTokenObtainPairSerializer
 from core.email_utils import send_otp_email
 from devices.models import Device
@@ -278,12 +279,30 @@ class MeView(APIView):
             'available_categories': InventoryItem.category_choices_for(org.business_type if org else 'general'),
             'service_enabled': org.service_enabled if org else False,
             'pharmacy_enabled': org.pharmacy_enabled if org else False,
+            # Branch modules (retail / restaurant / service) for the current branch and for every
+            # branch this user can see, and the features the business's package includes. Clients
+            # show restaurant screens only where 'restaurant' is on; the server enforces it anyway.
+            'modules': sorted(branch_modules(shop)) if shop else [],
+            'branch_modules': _branch_modules_map(user),
+            'features': sorted(organization_features(org)) if org else [],
             'shop_address': shop.address if shop else '',
             'shop_phone': shop.phone if shop else '',
             'shop_email': shop.email if shop else '',
             'shop_logo_url': shop.logo_url if shop else '',
             'shop_receipt_footer_note': shop.receipt_footer_note if shop else '',
         })
+
+
+def _branch_modules_map(user):
+    from .models import BranchModule
+    try:
+        shops = list(get_shops_for_user(user).values_list('id', flat=True))
+    except Exception:
+        return {}
+    out = {str(sid): [] for sid in shops}
+    for shop_id, module in BranchModule.objects.filter(shop_id__in=shops, enabled=True).values_list('shop_id', 'module'):
+        out[str(shop_id)].append(module)
+    return {k: sorted(v) for k, v in out.items()}
 
 
 class ControlCenterView(APIView):

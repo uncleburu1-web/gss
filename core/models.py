@@ -305,3 +305,29 @@ class IdempotencyRecord(models.Model):
 
     class Meta:
         constraints = [models.UniqueConstraint(fields=['user', 'key'], name='uniq_idempotency_user_key')]
+
+
+class BranchModule(models.Model):
+    """Which parts of Benchline a branch uses: `retail` (the supermarket POS), `restaurant`, `service`
+    (repairs). One business can mix branch kinds (owner's decision 4, 21 Oct 2026); the package the
+    business pays for decides which modules it may switch on (core.modules.can_enable).
+
+    A table rather than a field on Shop: a branch can run more than one module, every switch is a row
+    with who and when, and new modules need no migration. See docs/architecture/TARGET_ARCHITECTURE.md §1.
+    """
+    RETAIL = 'retail'
+    RESTAURANT = 'restaurant'
+    SERVICE = 'service'
+    MODULE_CHOICES = [(RETAIL, 'Supermarket / retail'), (RESTAURANT, 'Restaurant'), (SERVICE, 'Service / repairs')]
+
+    shop = models.ForeignKey(Shop, on_delete=models.CASCADE, related_name='modules')
+    module = models.CharField(max_length=20, choices=MODULE_CHOICES)
+    enabled = models.BooleanField(default=True)
+    changed_at = models.DateTimeField(auto_now=True)
+    changed_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name='+')
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=['shop', 'module'], name='unique_branch_module')]
+
+    def __str__(self):
+        return f'{self.shop} — {self.module}{"" if self.enabled else " (off)"}'

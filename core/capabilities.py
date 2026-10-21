@@ -127,6 +127,59 @@ CAPABILITIES = {
         ),
         'default_roles': set(),
     },
+
+    # ---- Restaurant (docs/restaurant/DOMAIN_MODEL.md §6). `module` lets the Control Center show
+    # these only to businesses that have restaurant branches. ----
+    'take_orders': {
+        'label': 'Take restaurant orders',
+        'description': 'Open orders, add and change items before they go to the kitchen.',
+        'default_roles': {'cashier', 'waiter'}, 'module': 'restaurant',
+    },
+    'send_to_kitchen': {
+        'label': 'Send orders to the kitchen',
+        'description': 'Send items to the kitchen stations (prints and shows the tickets).',
+        'default_roles': {'cashier', 'waiter'}, 'module': 'restaurant',
+    },
+    'move_table': {
+        'label': 'Move an order to another table',
+        'description': 'Move an open order to a free table.',
+        'default_roles': {'cashier', 'waiter'}, 'module': 'restaurant',
+    },
+    'take_payment': {
+        'label': 'Print bills and take payment',
+        'description': 'Print the bill and record payments. Cash needs an open shift.',
+        'default_roles': {'cashier'}, 'module': 'restaurant',
+    },
+    'mark_sold_out': {
+        'label': 'Mark menu items sold out',
+        'description': 'Switch an item off (and back on) during service.',
+        'default_roles': {'cashier', 'kitchen'}, 'module': 'restaurant',
+    },
+    'void_sent_item': {
+        'label': 'Void items already sent to the kitchen',
+        'description': 'Cancel items the kitchen has received. A reason is required; food already started is recorded as waste. Off by default.',
+        'default_roles': set(), 'module': 'restaurant',
+    },
+    'cancel_order': {
+        'label': 'Cancel an order that reached the kitchen',
+        'description': 'Cancel an unpaid order after items were sent. A reason is required. Off by default.',
+        'default_roles': set(), 'module': 'restaurant',
+    },
+    'apply_discount': {
+        'label': 'Discount a restaurant bill',
+        'description': 'Give a discount on a bill, with a reason. Never below what is already paid. Off by default.',
+        'default_roles': set(), 'module': 'restaurant',
+    },
+    'reprint_ticket': {
+        'label': 'Reprint kitchen tickets',
+        'description': 'Print a kitchen ticket again (marked COPY). Off by default.',
+        'default_roles': set(), 'module': 'restaurant',
+    },
+    'override_served_rule': {
+        'label': 'Take payment before everything is served',
+        'description': 'Override the branch rule that a dine-in bill is settled only after the food is served. Off by default.',
+        'default_roles': set(), 'module': 'restaurant',
+    },
 }
 
 
@@ -234,6 +287,7 @@ def effective_role_permissions(organization):
             'id': cap_id,
             'label': spec['label'],
             'description': spec['description'],
+            'module': spec.get('module', 'retail'),  # the Control Center groups/hides by this
             'roles': roles,
         })
 
