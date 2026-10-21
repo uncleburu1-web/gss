@@ -81,7 +81,8 @@ the drink goes to the Bar printer.
 - Any number of **tax rules per branch**, each with: name, rate, inclusive or exclusive, which menu
   categories it applies to, whether it applies to the service charge, and the dates it is valid.
 - An optional **service charge** per branch: rate, which service types it applies to (dine-in by
-  default), whether it is taxable.
+  default). Whether a tax also applies to the service charge is set on each tax rule, so VAT can
+  cover it while a consumption tax does not.
 - **Tips** are recorded on the payment, separate from revenue, tax and service charge.
 - Every bill stores a **snapshot** of each rate and amount it used. Changing a rate later never
   changes a past bill.

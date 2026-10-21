@@ -316,3 +316,12 @@ class RoleTests(TestCase):
         self.assertTrue(has_capability(worker(shop, 'cashier'), 'take_payment'))
         self.assertFalse(has_capability(worker(shop, 'kitchen'), 'take_orders'))
         self.assertFalse(has_capability(worker(shop, 'cashier'), 'void_sent_item'), 'voids are off by default')
+
+
+class BillingTests(TestCase):
+    def test_shared_bill_cases(self):
+        from .billing import compute_bill_or_error
+        cases = json.loads((Path(__file__).parent / 'billing_vectors.json').read_text())['cases']
+        self.assertGreaterEqual(len(cases), 15)
+        for case in cases:
+            self.assertEqual(compute_bill_or_error(case['input']), case['expect'], case['name'])

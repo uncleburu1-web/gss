@@ -35,7 +35,6 @@ class RestaurantSettings(SyncModel):
     service_charge_rate = models.DecimalField(max_digits=7, decimal_places=4, default=ZERO,
                                               validators=[MinValueValidator(ZERO), MaxValueValidator(HUNDRED)])
     service_charge_types = models.JSONField(default=list, blank=True, help_text='e.g. ["dine_in"]')
-    service_charge_taxable = models.BooleanField(default=False)
     require_served_before_payment = models.BooleanField(default=False)
     order_number_prefix = models.CharField(max_length=5, blank=True, default='')
     business_day_starts_at = models.TimeField(default=datetime.time(5, 0))
