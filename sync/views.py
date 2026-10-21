@@ -26,6 +26,7 @@ from rest_framework.views import APIView
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 
+from core.modules import branch_modules
 from core.permissions import is_owner
 from core.capabilities import has_capability
 from core.utils import get_shop_for_user, user_may_use_branch_device
@@ -1145,6 +1146,10 @@ class SyncPullView(APIView):
             # server_time stays exactly as before for older tills and displays.
             'next_since': (read_started - PULL_CURSOR_OVERLAP).isoformat(),
             'sync_protocol': SYNC_PROTOCOL,
+            # Which modules the branch uses now (retail / restaurant / service). Tills save these at
+            # sign-in; an owner can switch one on or off later (announced live as
+            # branch.modules_changed), so the next pull keeps the till current. Older tills ignore it.
+            'modules': sorted(branch_modules(shop)),
         })
 
 
