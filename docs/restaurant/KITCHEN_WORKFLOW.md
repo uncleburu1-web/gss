@@ -33,7 +33,8 @@ screen at all.
 **Reuse of the existing till printing.** The till already prints receipts silently to a chosen
 Windows printer (`main.js`, `print:receipt` → `webContents.print({ silent: true, deviceName })`).
 A kitchen ticket is printed the same way: the hub renders the ticket in a hidden window and prints
-it to the station's `printer_name`. USB and network printers both work, as long as they are
+it to the printer chosen for that station **on the hub PC** (a setting kept apart from the receipt
+printer, decision 5). USB and network printers both work, as long as they are
 installed in Windows. No new printing library.
 
 Ticket content (large type, no prices):

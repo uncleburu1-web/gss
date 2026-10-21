@@ -31,9 +31,9 @@ commercial business-management platform:
 release is held:** the v1.0.22 release check found a stock bug (FIX-01, gssdesktop PR #5). The next
 till build (v1.0.23) is published once that PR is merged and the checklist passes (OPS-01).
 
-**Restaurant (Parts 7–14): the owner decided the seven open questions on 21 Oct 2026** (section 7).
-Requirements and the full design (brief stages 5–6) are written and **waiting for review**
-(REST-02, REST-03). No restaurant code exists, by design: implementation starts after approval.
+**Restaurant (Parts 7–14):** requirements and design reviewed and merged (gss PR #7). Building has
+started on the `restaurant` branches: configuration, packages and permissions first, then kitchen
+routing. Nothing restaurant-related deploys until the complete workflow passes (REST-09).
 
 Milestones, as the brief defines them:
 
@@ -43,8 +43,8 @@ Milestones, as the brief defines them:
 | Core engine stages 0–11, web | Yes | Yes | E2E scripts only | Yes | Deployed by Cloudflare on merge; **stage 11 deploy not checked** |
 | Core engine stages 0–11, phone | Yes | Yes | E2E scripts only (shared with web) | Yes | APK built 21 Oct; **install on devices not verified** |
 | Core engine stages 0–11, till | Yes | Yes | Yes (137/137 with FIX-01; two-till E2E incl. outage) | Yes | **No.** v1.0.22 failed its release check; v1.0.23 pending (OPS-01) |
-| Branch modules | Designed, in review | No | No | No | No |
-| Restaurant | Designed, in review | No | No | No | No |
+| Branch modules and packages | Designed, reviewed | In progress | No | No | No |
+| Restaurant | Designed, reviewed | In progress | No | No | No |
 
 ## 3. Task board
 
@@ -60,10 +60,13 @@ A task is `COMPLETED` only with evidence recorded.
 | OPS-03 | Rotate the Postgres password shared in chat | Railway | — | NOT_STARTED | — | New password set; services redeployed and healthy | Health check + one till sync | — | Owner action | Owner |
 | OPS-04 | Delete the production test sale | prod data | — | NOT_STARTED | — | Test sale gone, stock restored, audited | Audit log entry | — | Owner action | Owner |
 | OPS-05 | Confirm stage 11 is live on web | gssfrontend | `main` | NOT_STARTED | — | `pos.gssolu.com` shows the "Sold by weight" option in Inventory | Manual check | — | — | Open Inventory → Add item |
-| REST-02 | Restaurant requirements (brief stage 5) | gss | `design/restaurant-foundation` | REVIEW_REQUIRED | Owner decisions 21 Oct | Workflows, rules, tax/charges with sources, acceptance criteria | — | `docs/restaurant/REQUIREMENTS.md` | — | Owner review |
-| REST-03 | Restaurant architecture (brief stage 6) | gss | `design/restaurant-foundation` | REVIEW_REQUIRED | REST-02 | Domain model, state transitions T1–T13, kitchen workflow, offline sync, events, API | — | `TARGET_ARCHITECTURE.md` + six `docs/restaurant/` documents | — | Owner review = **approval checkpoint** before any code |
-| CORE-12 | Branch modules (`BranchModule`, `RequiresModule`, `/api/me` modules) | gss, all clients | — | NOT_STARTED | REST-03 approved | Existing branches unchanged (retail, + service where enabled); a branch without `restaurant` gets 403 `module_disabled` | Django tests incl. cross-business isolation | — | — | — |
-| REST-04 | Cloud: restaurant configuration models + API + pull types | gss | — | NOT_STARTED | CORE-12 | Owner can set up menu, modifiers, tables, stations, taxes, service charge; tenant-isolated; audited | Django tests per endpoint, permission and isolation | — | — | — |
+| REST-02 | Restaurant requirements (brief stage 5) | gss | PR #7 | COMPLETED | Owner decisions 21 Oct | Workflows, rules, tax/charges with sources, acceptance criteria | — | `docs/restaurant/REQUIREMENTS.md`; owner instructed review + merge (decision 9) | — | — |
+| DOC-02 | Review of the restaurant design (PR #7) | gss | `design/restaurant-foundation` | COMPLETED | REST-03 | Full diff checked against the owner's list; issues fixed | Link check of every document | 14 issues fixed (session log, 21 Oct evening) | — | Merge |
+| CORE-13 | Packages (`Package`, `Subscription.package`, feature checks) | gss, clients | `restaurant` | NOT_STARTED | CORE-12 | Existing subscriptions unchanged (Retail); module switch-on needs the feature | Django tests | ADR-024 | Add-on price (billing only) | — |
+| REST-10 | Link stocked menu items (bottled drinks) and recipes to stock | gss, gssdesktop | — | DEFERRED | REST-09 | Restaurant sales move stock for linked items | — | First release moves no stock (DOMAIN_MODEL §1) | — | — |
+| REST-03 | Restaurant architecture (brief stage 6) | gss | PR #7 | COMPLETED | REST-02 | Domain model, state transitions T1–T13, kitchen workflow, offline sync, events, API | — | `TARGET_ARCHITECTURE.md` + six `docs/restaurant/` documents; reviewed (DOC-02) | — | — |
+| CORE-12 | Branch modules (`BranchModule`, `RequiresModule`, `/api/me` modules) | gss, all clients | `restaurant` | NOT_STARTED | REST-03 | Existing branches unchanged (retail, + service where enabled); a branch without `restaurant` gets 403 `module_disabled` | Django tests incl. cross-business isolation | — | — | — |
+| REST-04 | Cloud: restaurant configuration models + API + pull types | gss | `restaurant` | NOT_STARTED | CORE-12, CORE-13 | Owner can set up menu, modifiers, tables, stations, taxes, service charge; tenant-isolated; audited | Django tests per endpoint, permission and isolation | — | — | — |
 | REST-05 | Shared tax / service-charge engine (JS + Python, shared vectors) | gss, gssdesktop | — | NOT_STARTED | REST-04 | Identical results in both languages, incl. the Lagos example in REQUIREMENTS §4 | Shared vectors | — | — | — |
 | REST-06 | Hub order engine T1–T13 + kitchen printing | gssdesktop | — | NOT_STARTED | REST-05 | Table-service workflow on the hub, tickets printed per station, everything offline | Till tests per transition, idempotency, restart | — | — | — |
 | REST-07 | Hub local server, screen pairing, kitchen screen (SSE) | gssdesktop | — | NOT_STARTED | REST-06 | Screen shows and updates tickets live; catches up after a Wi-Fi drop; station isolation | Two-device LAN E2E | — | — | — |
@@ -182,12 +185,21 @@ work stays on its own branches and is never bundled into a till release before R
 | 6 | Kitchen output | Both, printing first if the existing printing can be reused safely; printer-only, screen-only or both per restaurant | `KITCHEN_WORKFLOW.md` |
 | 7 | VAT and service charge | Configurable taxes and service charge, snapshots on every bill, verified Nigerian rules, tips separate | `REQUIREMENTS.md` §4 |
 
-Still open (do not block the design):
+Second round, 21 Oct 2026 (evening):
 
-- Does a restaurant branch cost the same as a supermarket branch? (Billing only.)
-- Which taxes the first restaurant actually charges (VAT registered? Lagos?) — the owner's
-  accountant decides; the system supports each case.
-- Hardware for the first restaurant: kitchen printer(s), screen(s), UPS.
+| # | Question | Decision | Recorded in |
+| --- | --- | --- | --- |
+| 8 | Merge gssdesktop PR #5? | Yes, after checking checks, conflicts, dependencies and backend compatibility | OPS-01, FIX-01 |
+| 9 | Review gss PR #7 | Review the full diff (migrations, API compatibility, workflows, isolation, permissions, inventory, offline sync), fix issues, then merge | DOC-02 |
+| 10 | Restaurant branch price | Same base branch price; restaurant features controlled by the subscription **package** | ADR-024, `TARGET_ARCHITECTURE.md` §1 |
+| 11 | Taxes for the first restaurant | Configurable; VAT 7.5% where it applies; state consumption taxes where legally applicable; no automatic stacking; customer taxes apart from business taxes; confirm state, registration and law before activating | ADR-022, `REQUIREMENTS.md` §4 |
+| 12 | First restaurant hardware | One POS PC, one thermal kitchen printer, Wi-Fi router, cash drawer, UPS; KDS supported as an alternative; receipts and kitchen tickets configured separately | `REQUIREMENTS.md` §5 |
+
+Still open (billing only): the add-on price of the restaurant package(s).
+
+**Working rule for restaurant code:** it lives on a `restaurant` integration branch in each repo.
+Feature PRs merge into that branch; it merges to `main` (and deploys) only after the complete
+workflow passes (REST-09).
 
 ## 8. Development history
 
@@ -230,3 +242,17 @@ Still open (do not block the design):
 - **Decisions:** ADR-016 accepted; ADR-018, ADR-019 added; release gate stays manual (drafts).
 - **Next:** owner merges gssdesktop PR #5 → publish v1.0.23 after the checklist; owner reviews the
   restaurant design (approval checkpoint).
+
+### 21 Oct 2026 (evening) — PR reviews, decisions 8–12
+
+- **Done:** merged gssdesktop PR #5 after checking mergeability (clean, 0 behind main), dependencies
+  (none) and backend compatibility (the fix relies on `stock_shortfall` in pulled sale lines, which
+  the server already sends, `sync/views.py` `_serialize_sale_item`). Reviewed gss PR #7 and fixed 14
+  issues before merging (see DOC-02).
+- **Main review fixes:** the cloud re-adds a closed bill from its own frozen lines instead of
+  re-pricing it from current settings (would have rejected valid orders after a rate change);
+  station printers moved to the hub PC and kept apart from the receipt printer; packages; tax
+  activation safeguards; `cashier` role; minimum hardware and cash drawer; business-day start time;
+  tip outside the bill; restaurant `Sale` never touches stock; restaurant pull types only for
+  protocol-6 clients of restaurant branches; hub sign-in limited to the branch's staff; snapshot
+  coalescing in the outbox; event sequence wording for filtered screens.

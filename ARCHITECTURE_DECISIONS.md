@@ -213,7 +213,11 @@ Context for all of them: [`docs/architecture/CURRENT_ARCHITECTURE.md`](docs/arch
 - **Facts checked (21 Oct 2026).** VAT 7.5% under the Nigeria Tax Act 2025 (from 1 Jan 2026); small
   businesses (≤ ₦100m turnover) exempt from charging VAT; Lagos restaurant consumption tax 5% on the
   bill excluding VAT. Sources in `docs/restaurant/REQUIREMENTS.md` §4. Not legal advice.
-- **Status.** Accepted (decision); engine design awaiting review.
+- **Safeguards (owner, 21 Oct 2026, decision 4).** New rules start inactive; activating needs the
+  branch's state, VAT registration and a confirmed treatment; two rules hitting the same item need
+  explicit confirmation; customer taxes are kept apart from the business's own taxes; receipts and a
+  taxes-collected report show each tax.
+- **Status.** Accepted.
 
 ## ADR-023 A closed restaurant order also becomes a `Sale`
 
@@ -224,3 +228,15 @@ Context for all of them: [`docs/architecture/CURRENT_ARCHITECTURE.md`](docs/arch
 - **Alternative.** Teach every report to read two sources: more work, and easy to miss one.
 - **Status.** Proposed (21 Oct 2026).
 
+## ADR-024 Packages decide features; branches cost the same
+
+- **Decision (owner, 21 Oct 2026, decision 3).** Base subscription and per-branch price are the same
+  for a restaurant and a supermarket branch. Restaurant capabilities (tables, kitchen, ticket
+  printing, waiters, recipe costing) are controlled by the business's **package**.
+- **Design.** A `Package` (code, name, feature codes, optional add-on price) referenced by
+  `Subscription.package`; every existing subscription gets "Retail" (+ `service` where on today).
+  Switching a module on or saving restaurant configuration needs the feature (403 `not_in_package`).
+  Billing never stops a hub mid-service, in line with the existing rule that subscriptions control
+  cloud services only.
+- **Open.** Add-on price of the restaurant package(s).
+- **Status.** Accepted (decision); design in `docs/architecture/TARGET_ARCHITECTURE.md` §1.

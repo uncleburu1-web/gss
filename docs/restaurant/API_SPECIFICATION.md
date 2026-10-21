@@ -10,9 +10,9 @@ the building. Rules: [`REQUIREMENTS.md`](REQUIREMENTS.md); transitions T1–T13:
 | Topic | Rule |
 | --- | --- |
 | Errors | JSON `{"detail": "<plain-English message>", "code": "<machine code>"}`; 400 validation, 401 not signed in, 402 subscription ended (cloud), 403 not allowed / `module_disabled` / `not_the_hub`, 404 not found **or not yours** (never reveals another business's ids), 409 conflict (state changed, table taken, version mismatch) |
-| Idempotency | Every create or state change accepts `Idempotency-Key` (UUID). Same key + same body → the first response again; same key + different body → 409 `key_reused` (existing `core/idempotency.py` rule) |
+| Idempotency | Every create or state change accepts `Idempotency-Key` (UUID). Same key + same body → the first response again; same key + different body → 409 `key_reused` (existing `core/idempotency.py` rule). The hub stores keys in `hub_requests` for 48 hours |
 | Tenancy | Cloud: branch resolved by `get_shop_for_user` (+ `X-Branch-ID` for a CEO); hub: the hub serves exactly one branch. Every object id is looked up **within** that branch |
-| Module gate | Cloud restaurant endpoints and sync handlers require `RequiresModule('restaurant')` on the branch |
+| Module and package gate | Cloud restaurant endpoints and sync handlers require `RequiresModule('restaurant')` on the branch (403 `module_disabled`); switching a module on or saving restaurant configuration also requires the package feature (403 `not_in_package`) |
 | Money / quantities | Strings with fixed decimals in responses (`"4800.00"`, `"2.000"`); numbers accepted in requests |
 | Not exposed | No generic "update any field" endpoint for orders, bills or payments; only the named business operations below |
 
@@ -32,6 +32,9 @@ orders keep their references.
 | GET, POST, PATCH | `/api/restaurant/menu/modifier-groups/`, `/menu/modifier-options/` | Modifiers | `0 ≤ min_select ≤ max_select` |
 | GET, POST, PATCH | `/api/restaurant/tax-rules/` | Taxes | `0 ≤ rate ≤ 100`; `valid_to > valid_from`; overlapping rules with the same name refused |
 | POST | `/api/restaurant/tax-rules/preview/` | Compute a sample bill with the current rules (no write) | Same engine as the hub; used by the settings screen to show the owner the effect |
+| POST | `/api/restaurant/tax-rules/activate/` | Activate rules: `{"rule_ids": [...], "state": "Lagos", "vat_registered": true, "treatment_confirmed": true, "overlap_confirmed": false}` | 400 `confirm_treatment` without confirmation; 409 `overlapping_taxes` when two rules would hit the same item and `overlap_confirmed` is false. Audited `restaurant.tax_activated` |
+| GET, PUT | `/api/branches/{id}/modules/` | Branch modules | CEO / branch owner; 403 `not_in_package`; audited |
+| GET | `/api/restaurant/reports/taxes/?from=&to=` | Taxes collected per rule and period (to remit) | |
 
 ### Reading orders and reports (capability `view_all_sales` or own orders, as for sales today)
 
@@ -68,9 +71,9 @@ orders keep their references.
 }
 ```
 
-Rejections an `order_doc` can get: `bill_mismatch` (recomputed total differs), `unknown_menu_item`
-(not in this branch), `bill_not_settled` (closed without full payment), `not_the_hub`,
-`module_disabled`.
+Rejections an `order_doc` can get: `bill_mismatch` (the document's own frozen lines do not add up),
+`unknown_menu_item` / `unknown_tax_rule` (not in this branch), `bill_not_settled` (closed without
+full payment), `not_the_hub`, `module_disabled`.
 
 ## 2. Hub API (on the shop's Wi-Fi)
 
@@ -97,6 +100,7 @@ Auth: **staff** = signed in on the hub UI (same accounts as the till, offline si
 | POST | `/hub/v1/orders/{id}/cancel` | staff (`take_orders` / `cancel_order`) | T12 `{"reason": "…"}` | 409 `has_payments` |
 | POST | `/hub/v1/menu/items/{id}/availability` | staff (`mark_sold_out`) | T13 | |
 | GET | `/hub/v1/tables`, `/hub/v1/orders?status=open` | staff | Floor view and open orders | |
+| GET, PUT | `/hub/v1/printers` | staff (owner / manager) | Receipt printer and one printer per kitchen station on this PC, plus a test print | Separate from each other (decision 5); stored on the hub only |
 | GET | `/hub/v1/health` | anyone on the LAN | "Network check": hub version, time, cloud status | No data |
 
 Every write runs in one SQLite transaction with its audit entry, its `hub_events` row and its outbox

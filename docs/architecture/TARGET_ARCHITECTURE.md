@@ -56,10 +56,32 @@ branch is a restaurant".
   see [`DOMAIN_MODEL.md`](../restaurant/DOMAIN_MODEL.md)). Staff, devices and stock are already
   per branch.
 
-### Open question for the owner
+### Packages: what a business may switch on (decision 3)
 
-Subscription price is per business plus per extra branch. Does a restaurant branch cost the same as
-a supermarket branch? (Affects billing only, not the design.)
+A branch costs the same whatever it is: the base subscription and the per-branch price do not
+change for a restaurant. What differs is the **package** the business subscribes to, which decides
+which features it may switch on.
+
+| Feature code | Covers |
+| --- | --- |
+| `retail` | Today's supermarket features (every existing business keeps this) |
+| `service` | Repairs / service desk (as today) |
+| `restaurant.tables` | Floor plan, dine-in orders |
+| `restaurant.kitchen` | Kitchen stations, tickets, kitchen ticket printing, kitchen screens |
+| `restaurant.waiters` | Waiter phones (step 2) |
+| `restaurant.recipes` | Recipe costing and ingredient stock (later) |
+
+- **Model:** a `Package` (code, name, list of feature codes, optional add-on price) and
+  `Subscription.package`. Packages are data, so they can be added or re-priced without code. Every
+  existing subscription gets the "Retail" package (plus `service` where on today): nothing changes.
+- **Rule:** a branch module can be switched on, and restaurant configuration saved, only if the
+  package includes the features it needs (403 `not_in_package`). The hub learns its features from
+  the pull.
+- **Never mid-service:** consistent with the existing rule that billing only controls cloud services,
+  a package change or an expired subscription never stops a hub that is already running a
+  restaurant; it stops new set-up and cloud sync, exactly as for supermarket tills.
+- **Trial:** proposed to include every package, so a restaurant can try the full system.
+- **Open (pricing only):** the add-on price of the restaurant package(s), if any.
 
 ## 2. The restaurant runs on a hub till on the shop's Wi-Fi
 

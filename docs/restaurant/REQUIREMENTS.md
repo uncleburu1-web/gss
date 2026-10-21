@@ -26,6 +26,9 @@ Status: **design, awaiting review.**
 - **Counter (pay first):** order → bill → payment → send to kitchen → ready → collected. The
   only difference is the order of steps, so it is the same order, not a second system.
 
+**Business day.** Orders belong to the business day they were opened in. The day starts at a
+set time per branch (default 05:00), so late service past midnight stays in one day's report.
+
 Each order records three separate things (decision 5): its **service type**
 (`dine_in`, `takeaway`, `counter`), its **payment status** (unpaid, partly paid, paid) and its
 **kitchen status** (nothing sent, in the kitchen, ready, served).
@@ -62,6 +65,10 @@ before payment are in).
   station's printer, **and/or** shown on the station's **kitchen screen**, per station settings.
   A restaurant may have printers only, screens only, or both.
 - **Reprint** needs the `reprint_ticket` capability and is audited; a reprint is marked "COPY".
+- **Receipts and kitchen tickets are configured separately** (decision 5): the customer receipt
+  printer is one setting; each station's kitchen printer is its own setting, both on the hub PC.
+- **No duplicate tickets when the network drops:** sending is idempotent (one set of tickets per
+  request, however often it is retried), and kitchen screens catch up rather than re-create.
 - Voids after sending print/show a **VOID** slip for that station.
 
 Example: pizza, fries and a soft drink → the pizza and fries go to the Kitchen printer and screen;
@@ -80,6 +87,21 @@ the drink goes to the Bar printer.
   changes a past bill.
 - Order of calculation: item subtotal → discount → service charge → each tax on its own base →
   total. Each amount is rounded half-up to the kobo, once per line of the breakdown.
+- A **tip** is paid on top of the bill (`tip` on the payment line). It never counts toward the
+  bill, is not taxed and is not service charge.
+
+### Safeguards before any tax is charged (decision 4)
+
+- A new tax rule is **inactive**. To activate the first rules for a branch, the owner records the
+  branch's **state**, whether the business is **VAT-registered**, and confirms the treatment was
+  checked (with their accountant). Who activated what, and when, is audited.
+- If two active rules would apply to the same item (for example VAT and a state consumption tax),
+  activation is **refused** until the owner explicitly confirms that both apply
+  (`overlap_confirmed`). Nothing is stacked automatically.
+- Only **taxes charged to customers** live here. The restaurant's own income tax, payroll and other
+  liabilities stay in Expenses / Liabilities and never appear on a customer bill.
+- Receipts show each tax by name, rate and amount. A "taxes collected" report per rule and period
+  gives the figure to remit.
 
 ### What the rules are in Nigeria today (checked 21 Oct 2026, not legal advice)
 
@@ -110,7 +132,17 @@ A Lagos dine-in bill with a 10% service charge that is not taxed, Lagos consumpt
 | VAT 7.5% of 48,000 | 3,600.00 |
 | **Total payable** | **58,800.00** |
 
-## 5. Acceptance criteria for the first release
+## 5. Minimum hardware (decision 5)
+
+| Item | Role |
+| --- | --- |
+| One POS computer (Windows) | Cashier till **and** the hub |
+| One thermal kitchen printer | Kitchen tickets (KDS screens are an optional alternative or addition) |
+| One Wi-Fi router | Connects the POS and any kitchen screens; set a fixed address for the POS |
+| One cash drawer (if cash is taken) | Opened by the **receipt printer**: plugged into it and set to open in the printer driver's settings. No extra software. (Benchline has no direct drawer control today) |
+| A UPS | Keeps the POS and router running through power cuts |
+
+## 6. Acceptance criteria for the first release
 
 1. The full table-service workflow (section 1) completes on a hub till with kitchen tickets printed
    and shown on a kitchen screen, and the closed order appears in the cloud **once** with the same
@@ -130,3 +162,7 @@ A Lagos dine-in bill with a 10% service charge that is not taxed, Lagos consumpt
    restaurant's data through the API, the sync endpoint or the kitchen screen.
 9. Reports and the cashier's Z-report include restaurant takings.
 10. Existing supermarket behaviour is unchanged (all existing tests pass).
+11. A business whose package does not include restaurant features cannot switch the module on; a
+    running restaurant is never stopped mid-service by billing.
+12. No tax is charged until activated with the safeguards in §4; overlapping taxes need explicit
+    confirmation.

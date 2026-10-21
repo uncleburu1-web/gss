@@ -24,7 +24,7 @@ over HTTP. Status: **design, awaiting review.**
 | Field | Meaning |
 | --- | --- |
 | `id` | Unique event id (UUID) |
-| `seq` | Gap-free per branch on the hub (`hub_events.seq`) or per shop in the cloud (`Shop.last_event_sequence`); a client that sees a gap knows it missed something |
+| `seq` | Increasing per branch on the hub (`hub_events.seq`) and gap-free per shop in the cloud (`Shop.last_event_sequence`). A kitchen screen sees only its stations' events, so gaps are normal there; it recovers with `Last-Event-ID`, not by counting gaps |
 | `type` | From the lists below |
 | `schema` | Version of this event's `data` shape; a client ignores versions it does not know and re-reads state |
 | `organization_id`, `branch_id` | Scope; the server also enforces it (section 3) |

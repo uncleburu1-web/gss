@@ -52,15 +52,17 @@ hub_events(seq INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT, type TEXT, station_id
 
 New pull entity types: `restaurant_settings`, `dining_area`, `restaurant_table`, `kitchen_station`,
 `menu_category`, `menu_item`, `modifier_group`, `modifier_option`, `menu_item_modifier_group`,
-`tax_rule`. Same cursor, overlap and paging rules as products today. A change made in the cloud
-while an order is open never alters that order (prices and rates are snapshotted).
+`tax_rule`, `package_features`. Same cursor, overlap and paging rules as products today. They are
+sent only to a client that announces protocol 6 **and** whose branch has the restaurant module, so
+supermarket tills and older versions are unaffected. A change made in the cloud while an order is
+open never alters that order (prices and rates are snapshotted).
 
 ### Up: orders
 
 | Op | When | Contents | Applied in the cloud |
 | --- | --- | --- | --- |
-| `order_doc` | When an order **closes or is cancelled** | The order, its items and modifiers, voids (with waste flag), tickets with their timestamps, the bill with its charges, all payments | In **one** Postgres transaction: recompute the bill with the Python tax engine and **reject a mismatch**; write the restaurant rows; write a `Sale` (`source='restaurant'`, linked to the order) with lines by name, tax and payments, so reports and Z-reports include it; audit entries |
-| `order_snapshot` | After each send / payment while an order is open, when online | Same shape, flagged *open* | Stored as a non-authoritative mirror (CEO's live view, recovery if the hub PC is lost). Replaced by the `order_doc` when it arrives |
+| `order_doc` | When an order **closes or is cancelled** | The order, its items and modifiers, voids (with waste flag), tickets with their timestamps, the bill with its charges, all payments | In **one** Postgres transaction: check every referenced menu item, option, table, station and tax rule belongs to this branch; **re-add the bill from its own frozen lines** (prices, rates, bases in the document) with the Python engine and reject an arithmetic mismatch, never re-price it from today's configuration (a rate changed after the bill was printed must not reject a valid order); check payments cover the total; write the restaurant rows; write a `Sale` (`source='restaurant'`, no inventory items, no stock movement) so reports and Z-reports include it; audit entries |
+| `order_snapshot` | After each send / payment while an order is open, when online | Same shape, flagged *open* | Stored as a non-authoritative mirror (CEO's live view, recovery if the hub PC is lost). Replaced by the `order_doc` when it arrives. On the hub, a newer snapshot **replaces** an unsent older one for the same order, so the outbox never fills with stale copies |
 | `menu_availability` | Sold out / back on | Item id, flag, who, when | Updates the cloud copy; audited |
 | `audit_event`, `shift`, `cash_movement` | As today | | As today |
 
@@ -101,7 +103,9 @@ orders data by device clocks.
 - The local server listens only while the branch has the restaurant module and kitchen screens are
   enabled.
 - Every request needs either a signed-in staff session on the hub UI or a **paired screen token**
-  bound to the branch and its stations. Unknown or revoked tokens get 401; a screen acting outside
+  bound to the branch and its stations. Staff sign-in on the hub follows the existing device rule:
+  only staff of the hub's branch (or the business's CEO) can sign in on it
+  (`core.utils.user_may_use_branch_device`). Unknown or revoked tokens get 401; a screen acting outside
   its stations gets 403.
 - Pairing codes expire after 10 minutes and work once. Too many wrong codes lock pairing for a while.
 - Tokens are stored hashed on the hub. Screens hold no customer data beyond the open tickets.
