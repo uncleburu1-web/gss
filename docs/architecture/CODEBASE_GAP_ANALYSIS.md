@@ -48,7 +48,7 @@ The brief's audit checklist (Part 3.1), plus what was added in stages 1–11.
 | Cloud sync (outbox, idempotency) | Verified | `sync.js`, `sync/views.py`; `sync/test_stage1*.py`, `test_stage2.py`; two-till E2E 13/13 + 4/4 (20 Oct) | Tills only meet through the cloud | **Reuse the protocol.** Not enough on its own for a kitchen that must work offline (section 5) |
 | WebSockets | Verified | `realtime/*`; `realtime/tests.py` | Section 2, R1 and R2 | **Extend** with restaurant events |
 | Device monitoring | Verified | `devices/models.py`; `devices/test_stage1b.py` | | Reuse for KDS screens and waiter phones |
-| Till auto-update | **Broken** | `updater.js` + GitHub Releases | All releases since v1.0.17 are drafts (B1) | Same pipeline |
+| Till auto-update | Exists, gated | `updater.js` + GitHub Releases | Releases stay drafts until the release checklist passes (decision 1, ADR-020) | Same pipeline |
 | Web/phone automated tests | Missing | Only hand-run E2E scripts in `gssfrontend/e2e/` | | Needed before restaurant screens |
 
 ## 2. Core POS gaps
@@ -75,6 +75,7 @@ The brief's audit checklist (Part 3.1), plus what was added in stages 1–11.
 | # | Finding | Practical impact | Evidence | Severity | Proposed fix |
 | --- | --- | --- | --- | --- | --- |
 | B1 | Every till installer since v1.0.17 is a **draft** GitHub Release | Tills never see an update: `electron-updater` reads published releases only. The shop's till has not received stages 3–11 through auto-update | `gh api repos/uncleburu1-web/gssdesktop/releases`: v1.0.17–v1.0.22 `draft=true`; `releases/latest` → 404, so **no** release has ever been published | **High** | Publish the latest release once (owner's call), then set `releaseType: "release"` in the electron-builder config so future builds publish themselves |
+| B2 | A till rebuilding stock from the cloud's history clamped at zero while replaying it out of order, losing stock changes (found in the v1.0.22 release check, 21 Oct) | A fresh or upgrading till could show more stock than the cloud (test: 14 vs 6) | `gssdesktop/test/stock-replay.test.js` | **High** (release-blocking) | Fixed in gssdesktop PR #5: apply exactly what the cloud applied, never clamped |
 | R1 | A `RealtimeEvent` row is written in `on_commit`, after the data commits, not in the same transaction | If the process dies in that gap, the data is safe but no event row exists, so a client that relies on sequence numbers does not learn it missed something. Harmless today (clients also poll). It **matters for a kitchen screen**, which must never miss a new ticket | `realtime/events.py` `broadcast()` → `transaction.on_commit(_send)` | Low now, High for restaurant | For restaurant events, write the event row inside the business transaction (a transactional outbox) and send after commit |
 | R2 | Channel layer is in-memory | Works only while the backend is one process. A second Railway replica would split sockets into two worlds | `benchline/settings.py` `CHANNEL_LAYERS` | Low (one process today) | Add Redis only when a second process is needed; document the trigger |
 | C1 | Web and phone are one app copied into two repos, and have drifted | Every change is made twice; fixes land in one and not the other (e.g. 319 differing lines in `Reports.jsx`) | `diff gssfrontend/src/pages gssandriod/src/pages` | Medium | Decide before restaurant screens: shared package or one repo with a Capacitor build. Needs owner approval (section 6) |
@@ -122,8 +123,7 @@ The brief (Part 5, step 4) asks what actually happens. Checked against code and 
 The last two are the big architectural choices; they are written up with options in
 [`docs/restaurant/FLOCAFE_ANALYSIS.md`](../restaurant/FLOCAFE_ANALYSIS.md#5-the-big-design-question-how-devices-talk-during-an-outage).
 
-## 6. Decisions that need the owner
+## 6. Decisions
 
-1. **B1:** publish the v1.0.22 draft so the shop's till can update (a production action).
-2. **C1:** how to stop the web/phone copy drift before restaurant screens are written.
-3. **Restaurant offline model:** see the FloCafe analysis, section 5.
+The owner decided B1, C1 and the restaurant questions on 21 Oct 2026; see
+[`PROJECT_TRACKER.md`](../../PROJECT_TRACKER.md#7-owner-decisions-21-oct-2026).
