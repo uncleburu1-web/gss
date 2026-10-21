@@ -1,6 +1,17 @@
+import uuid
+
 from django.db import transaction
 from rest_framework import viewsets
-from rest_framework.exceptions import PermissionDenied
+from rest_framework.exceptions import NotFound, PermissionDenied
+from rest_framework.permissions import IsAuthenticated
+from rest_framework.response import Response
+from rest_framework.views import APIView
+
+import audit
+from core import modules
+from core.models import BranchModule
+from core.permissions import is_ceo
+from core.utils import get_shops_for_user
 
 from core.permissions import IsCeo
 from core.utils import get_organization_for_user
@@ -90,3 +101,61 @@ class BranchViewSet(viewsets.ModelViewSet):
         instance.status = 'archived'
         instance.save(update_fields=['status', 'updated_at'])
         broadcast(instance, 'branch.updated', {'id': str(instance.id), 'status': 'archived'})
+
+
+class BranchModulesView(APIView):
+    """GET / PUT /api/branches/{id}/modules/ — which modules a branch uses (retail, restaurant,
+    service). The CEO, or an owner / branch manager OF THAT BRANCH, may change them. Switching one
+    on needs the business's package to include it (403 not_in_package); switching off is always
+    allowed. Every change is audited. See docs/architecture/TARGET_ARCHITECTURE.md §1."""
+    permission_classes = [IsAuthenticated]
+
+    def _branch(self, request, pk):
+        try:
+            shop = get_shops_for_user(request.user).filter(id=uuid.UUID(str(pk))).first()
+        except ValueError:
+            shop = None
+        if shop is None:
+            raise NotFound('Branch not found.')
+        return shop
+
+    @staticmethod
+    def _may_change(user, shop):
+        if is_ceo(user) and shop.organization.owner_id == user.id:
+            return True
+        worker = getattr(user, 'worker', None)
+        return bool(worker and worker.shop_id == shop.id and worker.role in ('owner', 'branch_manager'))
+
+    @staticmethod
+    def _state(shop):
+        on = modules.branch_modules(shop)
+        return {'branch_id': str(shop.id), 'modules': {m: (m in on) for m in modules.MODULES},
+                'available': {m: modules.can_enable(shop, m) for m in modules.MODULES}}
+
+    def get(self, request, pk):
+        return Response(self._state(self._branch(request, pk)))
+
+    def put(self, request, pk):
+        shop = self._branch(request, pk)
+        if not self._may_change(request.user, shop):
+            raise PermissionDenied('Only the CEO or an owner or manager of this branch can change its modules.')
+        wanted = request.data.get('modules')
+        if not isinstance(wanted, dict) or any(k not in modules.MODULES or not isinstance(v, bool) for k, v in wanted.items()):
+            return Response({'detail': f'Send {{"modules": {{"<module>": true/false}}}} with modules from {", ".join(modules.MODULES)}.',
+                             'code': 'invalid'}, status=400)
+        current = modules.branch_modules(shop)
+        changes = {m: v for m, v in wanted.items() if v != (m in current)}
+        for module, on in changes.items():
+            if on and not modules.can_enable(shop, module):
+                return Response({'detail': f"Your business's package does not include {module}.", 'code': 'not_in_package'}, status=403)
+        with transaction.atomic():
+            for module, on in changes.items():
+                row, _ = BranchModule.objects.get_or_create(shop=shop, module=module, defaults={'enabled': on, 'changed_by': request.user})
+                row.enabled, row.changed_by = on, request.user
+                row.save(update_fields=['enabled', 'changed_by', 'changed_at'])
+            if changes:
+                audit.record('branch.modules_changed', shop=shop, user=request.user, target=shop,
+                             summary=', '.join(f'{m} {"on" if v else "off"}' for m, v in changes.items()),
+                             data={'changes': changes})
+                broadcast(shop, 'branch.modules_changed', {'id': str(shop.id), 'changes': changes})
+        return Response(self._state(shop))

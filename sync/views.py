@@ -36,6 +36,7 @@ from inventory import ledger
 from inventory.models import InventoryItem, StockBatch, StockMovement
 from realtime.events import broadcast
 from sales.models import Sale, SaleItem, next_invoice_number
+from restaurant import sync as restaurant_sync
 from promotions.engine import as_dict as _promotion_as_dict
 from promotions.models import Promotion
 from shifts.models import CashMovement, Shift
@@ -1077,7 +1078,9 @@ class SyncPullView(APIView):
         since_param = request.query_params.get('since')
         since = parse_datetime(since_param) if since_param else None
         requested = request.query_params.get('entity_types')
-        entity_types = [t for t in (requested.split(',') if requested else list(self.serializers)) if t in self.serializers]
+        # Restaurant configuration is opt-in: only when named AND the branch is a restaurant branch.
+        available = {**self.serializers, **restaurant_sync.allowed_for(shop)} if requested else self.serializers
+        entity_types = [t for t in (requested.split(',') if requested else list(self.serializers)) if t in available]
 
         # Paging (G11). Without `limit` (older tills) everything changed since `since` comes back
         # in one response, exactly as before. With `limit`, rows come back in a stable order
@@ -1095,7 +1098,7 @@ class SyncPullView(APIView):
         for index, entity_type in enumerate(entity_types):
             if index < start_type:
                 continue
-            model, serialize = self.serializers[entity_type]
+            model, serialize = available[entity_type]
             qs = model.objects.filter(shop=shop)
             if model is Sale:
                 qs = qs.prefetch_related('payments').select_related('worker__user')
