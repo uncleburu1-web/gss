@@ -131,12 +131,8 @@ ingredient stock, waiter phones, happy-hour pricing.
 
 ## 7. Questions for the owner
 
-These change the design, so they need answers before stage 5 (requirements):
-
-1. Offline model: approve option B (hub till) or prefer D (printer fallback only)?
-2. Is a restaurant a whole organization, or can one organization have both supermarket and restaurant
-   branches? (Today `Organization.business_type` is per organization and drives optional modules such
-   as Service.)
-3. Which first restaurant to design for: counter service (pay first) or table service (pay last)?
-4. Kitchen output: KDS screen, printer, or both?
-5. Does the restaurant charge VAT and/or a service charge on the bill?
+Answered on 21 Oct 2026: hub on the shop's Wi-Fi with printing as fallback; mixed supermarket and
+restaurant branches allowed; table service first; printer and screen both, printer first;
+configurable VAT and service charge. See
+[`PROJECT_TRACKER.md`](../../PROJECT_TRACKER.md#7-owner-decisions-21-oct-2026) and
+[`REQUIREMENTS.md`](REQUIREMENTS.md).

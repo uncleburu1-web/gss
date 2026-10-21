@@ -132,7 +132,7 @@ Context for all of them: [`docs/architecture/CURRENT_ARCHITECTURE.md`](docs/arch
   `AuditLog`, devices and the realtime layer. It does **not** reuse `Sale` as the order: a sale is
   final when created, an order changes for an hour. A closed order may *also* write a `Sale` for
   existing reports (to be decided in the design stage).
-- **Status.** Proposed (21 Oct 2026).
+- **Status.** Proposed (21 Oct 2026); detailed in `docs/restaurant/DOMAIN_MODEL.md`. Awaiting review.
 
 ## ADR-015 Order items and kitchen ticket items are separate
 
@@ -148,10 +148,17 @@ Context for all of them: [`docs/architecture/CURRENT_ARCHITECTURE.md`](docs/arch
 
 - **Options.** A cloud only · B hub till on the LAN · C peer-to-peer · D cloud + printer fallback
   (compared in `docs/restaurant/FLOCAFE_ANALYSIS.md` §5).
-- **Proposal.** B in two steps (hub till + KDS + kitchen printer first; waiter phones second), with D
-  as the fallback when the KDS screen is unavailable.
-- **Cost.** The hub is a single point of failure; the till gains a local server that must be secured.
-- **Status.** **Needs the owner's decision.**
+- **Decision (owner, 21 Oct 2026).** B: a local restaurant server on the shop's Wi-Fi, with kitchen
+  printing as an extra fallback (printing alone is not an offline strategy). Audit the desktop first
+  and prefer the simplest reliable LAN design.
+- **Design after the audit.** The existing till is the hub: Node's built-in HTTP server inside the
+  Electron main process, **Server-Sent Events** for live updates (no WebSocket library), existing
+  silent printing for tickets, one hub per branch enforced by the cloud. No separate server, database
+  or Redis on site. Steps: hub + printers + kitchen screens first; waiter phones second.
+- **Cost.** The hub is a single point of failure (UPS, restart-safe SQLite, open-order mirror to the
+  cloud); firewall rule and a fixed IP per restaurant; a local server to secure (pairing tokens).
+  Estimate in `docs/architecture/TARGET_ARCHITECTURE.md` §2.
+- **Status.** Accepted (decision); detailed design awaiting review.
 
 ## ADR-017 Kitchen events use a transactional outbox
 
@@ -160,3 +167,60 @@ Context for all of them: [`docs/architecture/CURRENT_ARCHITECTURE.md`](docs/arch
   event row **inside** the business transaction and send it after commit; clients resume from the
   last sequence they saw.
 - **Status.** Proposed (21 Oct 2026).
+
+## ADR-018 Code sharing: consistent behaviour, not identical code
+
+- **Decision (owner, 21 Oct 2026).** Keep web, Android and desktop as separate apps. The Django API is
+  the contract and enforces every money and stock rule. Share code only where it truly removes
+  duplication: documented API schemas and pure business calculations that must run offline (the
+  promotions engine today, the restaurant tax engine next), kept identical to Python by shared test
+  vectors and, proposed, a CI identity check (QA-03).
+- **Rejected.** Forcing Android onto the web app's codebase to maximise reuse.
+- **Status.** Accepted.
+
+## ADR-019 Branch modules
+
+- **Decision (owner, 21 Oct 2026).** One business may run supermarket branches, restaurant branches or
+  both; each branch has its own configuration; tenant isolation stays strict.
+- **Proposal.** A `BranchModule` row per (branch, module) for `retail`, `restaurant`, `service`;
+  `Organization.business_type` becomes only the retail catalogue flavour; `RequiresModule` on
+  endpoints and sync handlers; existing branches migrated to `retail` (+ `service` where on today).
+  Options compared in `docs/architecture/TARGET_ARCHITECTURE.md` §1.
+- **Status.** Decision accepted; design awaiting review.
+
+## ADR-020 The draft release is the till release gate
+
+- **Context.** CI creates every till installer as a GitHub draft; tills only see published releases.
+- **Options.** Make CI publish automatically · keep drafts and publish by hand after checks.
+- **Decision (owner, 21 Oct 2026).** Keep drafts. Publish only after `gssdesktop/docs/RELEASE_CHECKLIST.md`
+  passes. Automatic publishing would send every merge straight to the shop.
+- **Status.** Accepted.
+
+## ADR-021 Hub for open orders, cloud for everything else
+
+- **Proposal.** The hub till is the system of record for **open** orders, tickets, bills and payments
+  in progress; the cloud is the record for configuration, **closed** orders, reports and audit. Every
+  row keeps the hub's UUID. Only the branch's hub may send restaurant ops.
+- **Why.** One writer means no conflicting copies of an order, and the restaurant keeps running
+  offline.
+- **Status.** Proposed (21 Oct 2026); `docs/restaurant/OFFLINE_SYNCHRONIZATION.md`.
+
+## ADR-022 Taxes are configurable rules, frozen on every bill
+
+- **Decision (owner, 21 Oct 2026).** No hard-coded rate. Any number of tax rules per branch (rate,
+  inclusive/exclusive, categories covered, applies to service charge, validity dates), an optional
+  service charge, tips separate. Each bill stores the rates and amounts it used.
+- **Facts checked (21 Oct 2026).** VAT 7.5% under the Nigeria Tax Act 2025 (from 1 Jan 2026); small
+  businesses (≤ ₦100m turnover) exempt from charging VAT; Lagos restaurant consumption tax 5% on the
+  bill excluding VAT. Sources in `docs/restaurant/REQUIREMENTS.md` §4. Not legal advice.
+- **Status.** Accepted (decision); engine design awaiting review.
+
+## ADR-023 A closed restaurant order also becomes a `Sale`
+
+- **Proposal.** When the cloud applies an `order_doc`, it also writes a `Sale` (`source='restaurant'`,
+  linked to the order, lines by name, taxes and payments), so existing reports, payment summaries and
+  Z-reports include restaurant takings without rewriting them. Restaurant-only detail (tickets,
+  voids, waste, kitchen times) stays in the restaurant tables.
+- **Alternative.** Teach every report to read two sources: more work, and easy to miss one.
+- **Status.** Proposed (21 Oct 2026).
+
