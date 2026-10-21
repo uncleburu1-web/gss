@@ -42,9 +42,9 @@ Milestones, as the brief defines them:
 | Core engine stages 0–11, backend | Yes | Yes | Yes (266/266, 21 Oct) | Yes | **Yes**, Railway (latest deploy 21 Oct 07:06 Lagos) |
 | Core engine stages 0–11, web | Yes | Yes | E2E scripts only | Yes | Deployed by Cloudflare on merge; **stage 11 deploy not checked** |
 | Core engine stages 0–11, phone | Yes | Yes | E2E scripts only (shared with web) | Yes | APK built 21 Oct; **install on devices not verified** |
-| Core engine stages 0–11, till | Yes | Yes | Yes (137/137 with FIX-01; two-till E2E incl. outage) | Yes | **No.** v1.0.22 failed its release check; v1.0.23 pending (OPS-01) |
-| Branch modules and packages | Designed, reviewed | In progress | No | No | No |
-| Restaurant | Designed, reviewed | In progress | No | No | No |
+| Core engine stages 0–11, till | Yes | Yes | Yes (137/137 with FIX-01; two-till E2E incl. outage) | Yes | **Pending:** v1.0.23 passed its checklist; the owner publishes it (OPS-01) |
+| Branch modules and packages | Yes | Yes (`restaurant` branch, PR #8) | Yes (26 tests; full suite 292/292) | No | No |
+| Restaurant | Yes | Configuration + routing (PR #8, gssdesktop PR #6) | Partly | No | No |
 
 ## 3. Task board
 
@@ -55,20 +55,19 @@ A task is `COMPLETED` only with evidence recorded.
 
 | ID | Task | Repo | Branch | Status | Depends on | Acceptance criteria | Tests | Evidence | Blocker | Next action |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| OPS-01 | Release the till (gate: `docs/RELEASE_CHECKLIST.md`) | gssdesktop | `main` | BLOCKED | FIX-01 | The shop's till installs a published build and reports its version | Checklist items 1–8 | v1.0.22 **failed** item 4 (stock bug) on 21 Oct; items 3, 5, 6 passed (real-till upgrade SAFE, outage test 11/11, app id / data path unchanged since 21 Sep) | Owner merges gssdesktop PR #5; item 7 (upgrade on a real Windows PC) needs a person | After merge: confirm the v1.0.23 build, run the checklist, publish (approved by owner, decision 1) |
-| FIX-01 | A till rebuilding stock from cloud history could lose stock changes | gssdesktop | `fix/till-stock-replay` (PR #5) | REVIEW_REQUIRED | — | A fresh till and an existing till end with the cloud's stock whatever order the history arrives in | `test/stock-replay.test.js` (720 orders), suite, two-till E2E | Before: fresh till 14 vs cloud 6. After: 137/137; till-e2e 15/15 (fresh DB), till-e2e2 13/13, till-weight 4/4, till-outage 11/11; per-product fresh-till = cloud | — | Owner merges PR #5 |
+| OPS-01 | Release the till (gate: `docs/RELEASE_CHECKLIST.md`) | gssdesktop | `main` | BLOCKED | — | The shop's till installs a published build and reports its version | Checklist items 1–8 | **v1.0.23 passed** (21 Oct): build green, checksum = `latest.yml`, packaged app is 1.0.23 with the fix and the production URL, same data folder; 137/137; real-till upgrade SAFE; till-e2e 15/15, till-e2e2 13/13, till-weight 4/4, till-outage 11/11. Item 7 (physical Windows upgrade) covered by unchanged installer setup and dependencies since 11 Oct | **This session cannot publish GitHub releases (403)**: the owner publishes v1.0.23 | Owner: Releases → v1.0.23 → Publish; then check the till's `app_version` |
 | OPS-03 | Rotate the Postgres password shared in chat | Railway | — | NOT_STARTED | — | New password set; services redeployed and healthy | Health check + one till sync | — | Owner action | Owner |
 | OPS-04 | Delete the production test sale | prod data | — | NOT_STARTED | — | Test sale gone, stock restored, audited | Audit log entry | — | Owner action | Owner |
 | OPS-05 | Confirm stage 11 is live on web | gssfrontend | `main` | NOT_STARTED | — | `pos.gssolu.com` shows the "Sold by weight" option in Inventory | Manual check | — | — | Open Inventory → Add item |
 | REST-02 | Restaurant requirements (brief stage 5) | gss | PR #7 | COMPLETED | Owner decisions 21 Oct | Workflows, rules, tax/charges with sources, acceptance criteria | — | `docs/restaurant/REQUIREMENTS.md`; owner instructed review + merge (decision 9) | — | — |
 | DOC-02 | Review of the restaurant design (PR #7) | gss | `design/restaurant-foundation` | COMPLETED | REST-03 | Full diff checked against the owner's list; issues fixed | Link check of every document | 14 issues fixed (session log, 21 Oct evening) | — | Merge |
-| CORE-13 | Packages (`Package`, `Subscription.package`, feature checks) | gss, clients | `restaurant` | NOT_STARTED | CORE-12 | Existing subscriptions unchanged (Retail); module switch-on needs the feature | Django tests | ADR-024 | Add-on price (billing only) | — |
+| CORE-13 | Packages (`Package`, `Subscription.package`, feature checks) | gss, clients | `restaurant-config` (PR #8 → `restaurant`) | REVIEW_REQUIRED | CORE-12 | Existing subscriptions unchanged (Retail); module switch-on needs the feature | Django tests | Package model, starter packages, trial = all features | Add-on price (billing only) | — |
 | REST-10 | Link stocked menu items (bottled drinks) and recipes to stock | gss, gssdesktop | — | DEFERRED | REST-09 | Restaurant sales move stock for linked items | — | First release moves no stock (DOMAIN_MODEL §1) | — | — |
 | REST-03 | Restaurant architecture (brief stage 6) | gss | PR #7 | COMPLETED | REST-02 | Domain model, state transitions T1–T13, kitchen workflow, offline sync, events, API | — | `TARGET_ARCHITECTURE.md` + six `docs/restaurant/` documents; reviewed (DOC-02) | — | — |
-| CORE-12 | Branch modules (`BranchModule`, `RequiresModule`, `/api/me` modules) | gss, all clients | `restaurant` | NOT_STARTED | REST-03 | Existing branches unchanged (retail, + service where enabled); a branch without `restaurant` gets 403 `module_disabled` | Django tests incl. cross-business isolation | — | — | — |
-| REST-04 | Cloud: restaurant configuration models + API + pull types | gss | `restaurant` | NOT_STARTED | CORE-12, CORE-13 | Owner can set up menu, modifiers, tables, stations, taxes, service charge; tenant-isolated; audited | Django tests per endpoint, permission and isolation | — | — | — |
+| CORE-12 | Branch modules (`BranchModule`, `RequiresModule`, `/api/me` modules) | gss, all clients | `restaurant-config` (PR #8 → `restaurant`) | REVIEW_REQUIRED | REST-03 | Existing branches unchanged (retail, + service where enabled); a branch without `restaurant` gets 403 `module_disabled` | Django tests incl. cross-business isolation | BranchModule + endpoint + `/api/me`; 26 restaurant tests; full suite 292/292 | — | — |
+| REST-04 | Cloud: restaurant configuration models + API + pull types | gss | `restaurant-config` (PR #8 → `restaurant`) | REVIEW_REQUIRED | CORE-12, CORE-13 | Owner can set up menu, modifiers, tables, stations, taxes, service charge; tenant-isolated; audited | Django tests per endpoint, permission and isolation | Configuration API, tax activation safeguards, opt-in pull types | — | — |
 | REST-05 | Shared tax / service-charge engine (JS + Python, shared vectors) | gss, gssdesktop | — | NOT_STARTED | REST-04 | Identical results in both languages, incl. the Lagos example in REQUIREMENTS §4 | Shared vectors | — | — | — |
-| REST-06 | Hub order engine T1–T13 + kitchen printing | gssdesktop | — | NOT_STARTED | REST-05 | Table-service workflow on the hub, tickets printed per station, everything offline | Till tests per transition, idempotency, restart | — | — | — |
+| REST-06 | Hub order engine T1–T13 + kitchen printing | gssdesktop | `restaurant-routing` (gssdesktop PR #6 → `restaurant`) | IN_PROGRESS | REST-05 | Table-service workflow on the hub, tickets printed per station, everything offline | Till tests per transition, idempotency, restart | Kitchen routing done (JS = Python, shared cases); order engine next | — | — |
 | REST-07 | Hub local server, screen pairing, kitchen screen (SSE) | gssdesktop | — | NOT_STARTED | REST-06 | Screen shows and updates tickets live; catches up after a Wi-Fi drop; station isolation | Two-device LAN E2E | — | — | — |
 | REST-08 | Cloud ingest (`order_doc`), `Sale` on close, restaurant reports | gss, gssdesktop | — | NOT_STARTED | REST-06 | A closed order arrives once with matching totals; Z-report and reports include it | Sync tests + E2E | — | — | — |
 | REST-09 | Restaurant verification and release readiness (brief stages 9–10) | all | — | NOT_STARTED | REST-07, REST-08 | Acceptance criteria 1–10 in REQUIREMENTS §5 | Full workflow online, offline, with restarts | — | — | — |
@@ -105,13 +104,15 @@ scripts in `gssdesktop/e2e/` and `gssfrontend/e2e/`.
 | DOC-01 | Phase 0 baseline: tracker, decisions, architecture, gap analysis | gss (#6) | COMPLETED | Merged 21 Oct after owner review | — |
 | REST-01 | FloCafe analysis (brief stage 4) | gss (#6) | COMPLETED | `docs/restaurant/FLOCAFE_ANALYSIS.md`; owner answered its questions 21 Oct | — |
 | ARCH-01 | Decide how web and phone share code | — | COMPLETED | Decision 2 (section 7); follow-up QA-03 | — |
+| FIX-01 | Till stock rebuilt from cloud history could lose changes | gssdesktop (#5) | COMPLETED | 720-order replay test; 137/137; two-till E2E incl. outage; merged 21 Oct | v1.0.23 (awaiting publish) |
+| DOC-03 | Restaurant design reviewed and merged | gss (#7) | COMPLETED | 14 review fixes | — |
 
 ## 4. Bugs and blockers
 
 | ID | Problem | Impact | Status |
 | --- | --- | --- | --- |
 | B1 | Till installers are draft releases | Tills cannot auto-update | **By design now:** the draft is the release gate (decision 1); publish after the checklist → OPS-01 |
-| B2 | A till rebuilding stock from cloud history could lose stock changes (clamped at zero during an out-of-order replay) | A fresh or upgrading till could show more stock than the cloud (test: 14 vs 6) | Fixed in PR #5 → FIX-01; **release-blocking until merged** |
+| B2 | A till rebuilding stock from cloud history could lose stock changes (clamped at zero during an out-of-order replay) | A fresh or upgrading till could show more stock than the cloud (test: 14 vs 6) | Fixed (gssdesktop #5, merged); ships in v1.0.23 |
 | R1 | Realtime event row written after commit | Rare missed notification; must be fixed before kitchen events | Open → ADR-017 |
 | C1 | Web/phone drift | Double work, fixes land in one app only | Accepted (decision 2): keep two apps; shared contracts + shared pure JS with a CI identity check (QA-03) |
 
@@ -256,3 +257,17 @@ workflow passes (REST-09).
   tip outside the bill; restaurant `Sale` never touches stock; restaurant pull types only for
   protocol-6 clients of restaurant branches; hub sign-in limited to the branch's staff; snapshot
   coalescing in the outbox; event sequence wording for filtered screens.
+
+### 21 Oct 2026 (evening, continued) — release v1.0.23, restaurant foundation
+
+- **Release:** v1.0.23 built from the merged fix and checked on the actual installer (checksum,
+  version, fix present, production URL, data folder, N-API SQLite module, dependencies unchanged
+  since 11 Oct). Publishing is not permitted from this session (GitHub 403): **owner publishes**.
+- **Built (restaurant branch, not deployed):** branch modules and their endpoint, packages, cashier
+  / waiter / kitchen roles and ten capabilities, the restaurant configuration API with tax activation
+  safeguards, opt-in restaurant pull types, kitchen routing in Python and JavaScript with shared cases.
+- **Tests run (actual):** gss restaurant 26/26, full suite 292/292 (Postgres 16); migrations
+  forward → back → forward on a copy of a used database; gssdesktop 140/140 incl. routing 3/3.
+- **Bug caught by the tests:** a duplicate name returned a 500 (database constraint); now a clear 400.
+- **Next:** owner publishes v1.0.23 and reviews gss PR #8 and gssdesktop PR #6; then the hub order
+  engine (T1–T13) on the `restaurant` branch, then kitchen printing.
