@@ -126,6 +126,12 @@ def next_invoice_number(shop):
     return (current_max or 0) + 1
 
 
+# Categories of the lines a closed restaurant order's Sale is made of (restaurant/ingest.py).
+RESTAURANT = 'restaurant'                # food and drink, at the frozen menu price
+RESTAURANT_CHARGE = 'restaurant_charge'  # the service charge (the business's revenue)
+RESTAURANT_TAX = 'restaurant_tax'        # a tax added to the bill (collected for the government)
+
+
 class SaleItem(SyncModel):
     """One line in a sale's cart. Carries the same per-item fields the old
     single-item Sale model used to hold directly, so item-level reports
@@ -185,6 +191,10 @@ class SaleItem(SyncModel):
 
     @property
     def profit(self):
+        # A restaurant bill's added tax is a line of its Sale (restaurant/ingest.py) so the Sale adds
+        # up to what the customer paid, but it is the government's money, not profit.
+        if self.category == RESTAURANT_TAX:
+            return Decimal('0.00')
         return (self.unit_price - self.unit_cost) * self.quantity - self.discount
 
     @property
