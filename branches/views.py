@@ -9,7 +9,7 @@ from rest_framework.views import APIView
 
 import audit
 from core import modules
-from core.models import BranchModule
+from core.models import BranchModule, Shop
 from core.permissions import is_ceo
 from core.utils import get_shops_for_user
 
@@ -29,6 +29,17 @@ class SubscriptionRequired(PermissionDenied):
     mobile). This is the server-side backstop for someone hitting the API
     directly, not the primary UX path."""
     default_detail = 'Adding another branch needs an active plan — the first branch is included in your trial.'
+
+
+class NotInPackage(PermissionDenied):
+    """403 {"detail", "code": "not_in_package"}: the branch type needs a module the business's package
+    does not include (a restaurant branch on a retail-only package)."""
+
+    def __init__(self, shop_type):
+        label = dict(Shop._meta.get_field('shop_type').choices).get(shop_type, shop_type)
+        super().__init__({'detail': f"Your business's package does not include what a {label.split(' (')[0].lower()} "
+                                    "branch needs. Change the plan under Billing first.",
+                          'code': 'not_in_package'})
 
 
 class BranchViewSet(viewsets.ModelViewSet):
@@ -70,9 +81,14 @@ class BranchViewSet(viewsets.ModelViewSet):
         # billing page first when it can see the org is on trial; this is
         # the same rule enforced server-side, since a client-side check
         # alone is just a UI nicety, not security.
-        sub = get_or_create_subscription(self.request._resolved_organization)
+        org = self.request._resolved_organization
+        sub = get_or_create_subscription(org)
         if sub.effective_status == 'trial':
             raise SubscriptionRequired()
+        # Each branch is its own kind of shop (owner's decision 13); not named, it is the sign-up type.
+        shop_type = serializer.validated_data.get('shop_type') or org.business_type
+        if modules.missing_features_for_type(org, shop_type):
+            raise NotInPackage(shop_type)
         # organization_id is NEVER accepted from the client (see spec §2) —
         # it's always the authenticated CEO's own organization. Wrapped in
         # a transaction because a "create branch" request can also create
@@ -80,7 +96,7 @@ class BranchViewSet(viewsets.ModelViewSet):
         # BranchSerializer._sync_manager_login) -- either both rows land
         # or neither does.
         with transaction.atomic():
-            branch = serializer.save(organization=self.request._resolved_organization)
+            branch = serializer.save(organization=org, shop_type=shop_type)
         # Subscription lives on the ORGANIZATION now, not per-branch — a new
         # branch just becomes another "additional branch" the org's ONE
         # subscription already covers billing for (see subscriptions.models
@@ -90,9 +106,25 @@ class BranchViewSet(viewsets.ModelViewSet):
         broadcast(branch, 'branch.created', {'id': str(branch.id), 'name': branch.name})
 
     def perform_update(self, serializer):
+        old_type = serializer.instance.shop_type
+        new_type = serializer.validated_data.get('shop_type') or old_type
+        if new_type != old_type:
+            # Only the modules the new type adds need the package; switching off is always allowed.
+            on_now = modules.branch_modules(serializer.instance)
+            if [m for m in modules.missing_features_for_type(serializer.instance.organization, new_type) if m not in on_now]:
+                raise NotInPackage(new_type)
         with transaction.atomic():
             branch = serializer.save()
+            changes = {}
+            if new_type != old_type:
+                changes = modules.apply_type_modules(branch, self.request.user)
+                labels = dict(Shop._meta.get_field('shop_type').choices)
+                audit.record('branch.type_changed', shop=branch, user=self.request.user, target=branch,
+                             summary=f'{labels.get(old_type, old_type)} → {labels.get(new_type, new_type)}',
+                             data={'from': old_type, 'to': new_type, 'modules': changes})
         broadcast(branch, 'branch.updated', {'id': str(branch.id), 'name': branch.name})
+        if changes:
+            broadcast(branch, 'branch.modules_changed', {'id': str(branch.id), 'changes': changes})
 
     def perform_destroy(self, instance):
         # Never hard-delete a branch — it's the anchor for every historical
