@@ -15,7 +15,7 @@ def _id(value):
 
 def _settings(o):
     return {'id': str(o.id), 'hub_device_id': _id(o.hub_device_id), 'service_charge_rate': str(o.service_charge_rate),
-            'service_charge_types': o.service_charge_types, 'service_charge_taxable': o.service_charge_taxable,
+            'service_charge_types': o.service_charge_types,
             'require_served_before_payment': o.require_served_before_payment, 'order_number_prefix': o.order_number_prefix,
             'business_day_starts_at': o.business_day_starts_at.strftime('%H:%M'), 'tax_state': o.tax_state,
             'vat_registered': o.vat_registered}

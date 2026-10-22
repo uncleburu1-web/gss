@@ -273,6 +273,14 @@ class SyncPullTests(TestCase):
         turn_on_restaurant(self.shop)
         self.assertEqual(self.pull('kitchen_station'), ['kitchen_station'])
 
+    def test_every_pull_says_which_modules_the_branch_uses(self):
+        # A till keeps its copy current from this, so switching the restaurant on reaches it without
+        # anyone signing out and in again.
+        body = lambda: client_for(self.ceo).get('/api/sync/pull/').json()
+        self.assertEqual(body()['modules'], ['retail'])
+        turn_on_restaurant(self.shop)
+        self.assertEqual(body()['modules'], ['restaurant', 'retail'])
+
 
 class RoutingTests(TestCase):
     def test_shared_vectors(self):
@@ -316,3 +324,12 @@ class RoleTests(TestCase):
         self.assertTrue(has_capability(worker(shop, 'cashier'), 'take_payment'))
         self.assertFalse(has_capability(worker(shop, 'kitchen'), 'take_orders'))
         self.assertFalse(has_capability(worker(shop, 'cashier'), 'void_sent_item'), 'voids are off by default')
+
+
+class BillingTests(TestCase):
+    def test_shared_bill_cases(self):
+        from .billing import compute_bill_or_error
+        cases = json.loads((Path(__file__).parent / 'billing_vectors.json').read_text())['cases']
+        self.assertGreaterEqual(len(cases), 15)
+        for case in cases:
+            self.assertEqual(compute_bill_or_error(case['input']), case['expect'], case['name'])

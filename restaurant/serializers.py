@@ -34,7 +34,7 @@ class BranchScopedSerializer(serializers.ModelSerializer):
 class RestaurantSettingsSerializer(serializers.ModelSerializer):
     class Meta:
         model = RestaurantSettings
-        fields = ['id', 'service_charge_rate', 'service_charge_types', 'service_charge_taxable',
+        fields = ['id', 'service_charge_rate', 'service_charge_types',
                   'require_served_before_payment', 'order_number_prefix', 'business_day_starts_at',
                   'hub_device', 'tax_state', 'vat_registered', 'tax_treatment_confirmed_at', 'updated_at']
         # The hub and the tax confirmation have their own endpoints with their own checks.
