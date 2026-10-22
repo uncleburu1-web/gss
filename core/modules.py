@@ -15,6 +15,36 @@ MODULES = [m for m, _ in BranchModule.MODULE_CHOICES]
 # The package feature a module needs before it can be switched on.
 MODULE_FEATURE = {RETAIL: 'retail', SERVICE: 'service', RESTAURANT: 'restaurant.tables'}
 
+# The modules each shop type runs (owner's decision 13: a restaurant is a shop type, picked like
+# gadgets or pharmacy). A restaurant keeps `retail` too: its other tills still sell stocked goods
+# (drinks, takeaway packs) as an ordinary till, and the hub till runs the restaurant.
+TYPE_MODULES = {
+    'gadgets': [RETAIL, SERVICE],
+    'restaurant': [RETAIL, RESTAURANT],
+}
+
+
+def type_modules(shop_type):
+    return TYPE_MODULES.get(shop_type, [RETAIL])
+
+
+def missing_features_for_type(organization, shop_type):
+    """The modules a shop type needs that the business's package does not include (empty = allowed)."""
+    return [m for m in type_modules(shop_type) if not has_feature(organization, MODULE_FEATURE[m])]
+
+
+def apply_type_modules(shop, user=None):
+    """Make the branch's modules exactly its type's: switch the type's modules on and the rest off.
+    Switching off hides a module; nothing it recorded is deleted. Returns {module: on} for what changed."""
+    wanted = set(type_modules(shop.shop_type))
+    current = branch_modules(shop)
+    changes = {m: (m in wanted) for m in MODULES if (m in wanted) != (m in current)}
+    for module, on in changes.items():
+        row, _ = BranchModule.objects.get_or_create(shop=shop, module=module, defaults={'enabled': on, 'changed_by': user})
+        row.enabled, row.changed_by = on, user
+        row.save(update_fields=['enabled', 'changed_by', 'changed_at'])
+    return changes
+
 
 def branch_modules(shop):
     """The set of modules switched on for a branch."""

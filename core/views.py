@@ -12,11 +12,11 @@ from datetime import timedelta
 from inventory.models import InventoryItem, StockBatch
 from repairs.models import RepairTicket, RepairPayment
 from sales.models import Sale
-from core.models import Shop, Organization, EmailOTP
+from core.models import SHOP_TYPE_CHOICES, Shop, Organization, EmailOTP
 from core.permissions import is_ceo, IsCeo
 from core.capabilities import capabilities_for_user, effective_role_permissions, CAPABILITIES, CONFIGURABLE_ROLES
 from core.utils import get_shop_for_user, get_shops_for_user, get_organization_for_user
-from core.modules import branch_modules, organization_features
+from core.modules import branch_modules, organization_features, type_modules
 from core.auth_serializers import DeviceAwareTokenObtainPairSerializer
 from core.email_utils import send_otp_email
 from devices.models import Device
@@ -137,7 +137,8 @@ class RegisterView(APIView):
         with transaction.atomic():
             user = User.objects.create_user(username=username, password=password, email=email, is_active=False)
             org = Organization.objects.create(name=shop_name, owner=user, business_type=business_type)
-            shop = Shop.objects.create(organization=org, name=shop_name, email=email)
+            # The first branch is the type picked here; a restaurant starts with the restaurant module on.
+            shop = Shop.objects.create(organization=org, name=shop_name, email=email, shop_type=business_type)
             Worker.objects.create(shop=shop, user=user, full_name=full_name, role='owner')
             get_or_create_subscription(org)  # starts the free trial month immediately, no payment required yet
 
@@ -245,6 +246,10 @@ class MeView(APIView):
         is_owner_flag = user.is_staff or user.is_superuser or (worker and worker.role in ('owner', 'branch_manager'))
         shop = worker.shop if worker else None
         org = shop.organization if (shop and shop.organization) else get_organization_for_user(user)
+        # The type of THIS user's branch (owner's decision 13: each branch has its own type). For an
+        # existing business it is the sign-up type, so every older client sees exactly what it did.
+        shop_type = (shop.shop_type if shop else None) or (org.business_type if org else 'general')
+        modules_on = branch_modules(shop) if shop else set()
         return Response({
             'id': user.id,
             'username': user.username,
@@ -269,21 +274,29 @@ class MeView(APIView):
             'full_name': worker.full_name if worker else user.username,
             'shop_id': str(shop.id) if shop else None,
             'shop_name': (shop.name if shop else (org.name if org else None)) or 'My Shop',
-            'business_type': org.business_type if org else 'general',
-            'business_type_label': dict(Organization.BUSINESS_TYPE_CHOICES).get(org.business_type if org else 'general'),
+            'business_type': shop_type,
+            'business_type_label': dict(SHOP_TYPE_CHOICES).get(shop_type),
+            # What the business picked at sign-up: the default type for a branch added later.
+            'organization_business_type': org.business_type if org else 'general',
             # Single source of truth for the category picker on every
             # client (web/mobile Inventory, desktop Products) — replaces
             # each of them hard-coding their own gadgets/pharmacy category
             # lists, which is how a clothing or general shop used to end
             # up being offered "Laptop", and a gadgets shop "Medicine".
-            'available_categories': InventoryItem.category_choices_for(org.business_type if org else 'general'),
-            'service_enabled': org.service_enabled if org else False,
-            'pharmacy_enabled': org.pharmacy_enabled if org else False,
+            'available_categories': InventoryItem.category_choices_for(shop_type),
+            # Repairs follow the branch's `service` module (on for gadget shops); pharmacy screens follow
+            # the branch's type.
+            'service_enabled': ('service' in modules_on) if shop else bool(org and org.service_enabled),
+            'pharmacy_enabled': shop_type == 'pharmacy',
             # Branch modules (retail / restaurant / service) for the current branch and for every
             # branch this user can see, and the features the business's package includes. Clients
             # show restaurant screens only where 'restaurant' is on; the server enforces it anyway.
-            'modules': sorted(branch_modules(shop)) if shop else [],
+            'modules': sorted(modules_on),
             'branch_modules': _branch_modules_map(user),
+            # Every branch this user can see -> its type, and every type with its label, modules and
+            # stock categories, so a CEO's branch switcher shows each branch as what it is.
+            'branch_types': _branch_types_map(user),
+            'shop_types': _shop_types_info(),
             'features': sorted(organization_features(org)) if org else [],
             'shop_address': shop.address if shop else '',
             'shop_phone': shop.phone if shop else '',
@@ -291,6 +304,18 @@ class MeView(APIView):
             'shop_logo_url': shop.logo_url if shop else '',
             'shop_receipt_footer_note': shop.receipt_footer_note if shop else '',
         })
+
+
+def _shop_types_info():
+    return [{'value': value, 'label': label, 'modules': type_modules(value),
+             'categories': InventoryItem.category_choices_for(value)} for value, label in SHOP_TYPE_CHOICES]
+
+
+def _branch_types_map(user):
+    try:
+        return {str(sid): t for sid, t in get_shops_for_user(user).values_list('id', 'shop_type')}
+    except Exception:
+        return {}
 
 
 def _branch_modules_map(user):

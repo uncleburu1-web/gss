@@ -10,6 +10,11 @@ class BranchSerializer(serializers.ModelSerializer):
     manager_name = serializers.CharField(source='manager.full_name', read_only=True, default=None)
     manager_username = serializers.SerializerMethodField()
     is_operational = serializers.ReadOnlyField()
+    # What kind of shop the branch is (gadgets, pharmacy, restaurant, ...). Optional on create: left
+    # out, the branch takes the business's sign-up type. Changing it changes the branch's modules
+    # (BranchViewSet.perform_update).
+    shop_type = serializers.ChoiceField(choices=Shop._meta.get_field('shop_type').choices, required=False)
+    shop_type_label = serializers.ReadOnlyField()
 
     # Write-only -- stand up (or reset the login for) this branch's own
     # manager in the SAME request as the branch, the same way RegisterView
@@ -26,7 +31,8 @@ class BranchSerializer(serializers.ModelSerializer):
         model = Shop
         fields = [
             'id', 'name', 'branch_code', 'address', 'phone', 'email', 'logo_url', 'receipt_footer_note',
-            'manager', 'manager_name', 'manager_username', 'status', 'is_operational', 'opening_date',
+            'manager', 'manager_name', 'manager_username', 'status', 'is_operational', 'shop_type', 'shop_type_label',
+            'opening_date',
             'timezone', 'currency', 'tax_rate_default', 'description', 'created_at', 'updated_at',
             'manager_login_full_name', 'manager_login_username', 'manager_login_password',
         ]

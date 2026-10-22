@@ -1,6 +1,6 @@
-"""Every new branch starts as a supermarket branch (`retail`, plus `service` where the business has
-repairs), exactly what a branch was before modules existed. Covers both creation paths (sign-up in
-core.views.RegisterView and BranchSerializer.create) without touching them."""
+"""Every new branch starts with its shop type's modules (core.modules.TYPE_MODULES): `retail`, plus
+`service` for a gadget shop (what a branch always had) and `restaurant` for a restaurant. Covers every
+creation path (sign-up in core.views.RegisterView, BranchViewSet, the admin) without touching them."""
 from django.db.models.signals import post_save
 from django.dispatch import receiver
 
@@ -8,10 +8,8 @@ from .models import BranchModule, Shop
 
 
 def default_modules_for(shop):
-    modules = [BranchModule.RETAIL]
-    if shop.organization_id and shop.organization.repairs_enabled:
-        modules.append(BranchModule.SERVICE)
-    return modules
+    from .modules import type_modules
+    return type_modules(shop.shop_type)
 
 
 @receiver(post_save, sender=Shop)
