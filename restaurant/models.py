@@ -4,8 +4,9 @@ Design: docs/restaurant/DOMAIN_MODEL.md §2. Every model is a SyncModel, so ever
 branch (`shop`) and every query is filtered by the branches the user may see. Names are unique per
 branch among rows that are not deleted, so a deactivated "Grill" can be recreated.
 
-Orders, tickets, bills and payments (DOMAIN_MODEL §3) live on the hub and arrive later as
-documents; they are not in this module yet.
+Orders, tickets, bills and payments (DOMAIN_MODEL §3) live on the hub while open. A finished order
+arrives once, as one `order_doc` (restaurant/ingest.py), and is stored by the models at the end of
+this module with the hub's own ids. The cloud never changes them afterwards.
 """
 import datetime
 from decimal import Decimal
@@ -219,3 +220,148 @@ class TaxRule(SyncModel):
             return False
         mine, theirs = set(self.tax_classes or []), set(other.tax_classes or [])
         return not mine or not theirs or bool(mine & theirs)
+
+
+# ---------------------------------------------------------------------------------------------
+# Finished orders, as the hub sent them (DOMAIN_MODEL §3). Written only by restaurant/ingest.py,
+# in one transaction per order; read by reports. Prices, names and rates are the hub's frozen copies.
+# ---------------------------------------------------------------------------------------------
+MONEY = dict(max_digits=12, decimal_places=2)
+QTY = dict(max_digits=12, decimal_places=3)
+
+
+class Order(SyncModel):
+    STATUS_CHOICES = [('closed', 'Closed'), ('cancelled', 'Cancelled')]
+    number = models.CharField(max_length=30)
+    service_type = models.CharField(max_length=10, choices=[(t, t) for t in SERVICE_TYPES])
+    table = models.ForeignKey(RestaurantTable, on_delete=models.SET_NULL, null=True, blank=True, related_name='orders')
+    guests = models.PositiveSmallIntegerField(null=True, blank=True)
+    waiter = models.CharField(max_length=150, blank=True)
+    opened_by = models.CharField(max_length=150, blank=True)
+    status = models.CharField(max_length=10, choices=STATUS_CHOICES)
+    business_date = models.DateField()
+    opened_at = models.DateTimeField()
+    closed_at = models.DateTimeField(null=True, blank=True)
+    cancel_reason = models.CharField(max_length=255, blank=True)
+    notes = models.TextField(blank=True)
+    pricing = models.JSONField(default=dict, help_text='Service charge and tax rules frozen when the order opened')
+    device = models.ForeignKey('devices.Device', on_delete=models.SET_NULL, null=True, blank=True, related_name='+')
+    sale = models.OneToOneField('sales.Sale', on_delete=models.SET_NULL, null=True, blank=True, related_name='restaurant_order',
+                                help_text='The Sale that puts this order in the existing reports (ADR-023); none when cancelled')
+    received_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-closed_at']
+        indexes = [models.Index(fields=['shop', 'status']), models.Index(fields=['shop', 'business_date'])]
+
+    def __str__(self):
+        return f'{self.number} ({self.business_date})'
+
+
+class OrderItem(SyncModel):
+    order = models.ForeignKey(Order, on_delete=models.CASCADE, related_name='items')
+    menu_item = models.ForeignKey(MenuItem, on_delete=models.SET_NULL, null=True, blank=True, related_name='+')
+    name = models.CharField(max_length=120)
+    unit_price = models.DecimalField(**MONEY)
+    modifiers_price = models.DecimalField(**MONEY, default=ZERO)
+    tax_class = models.CharField(max_length=30, blank=True)
+    quantity = models.DecimalField(**QTY)
+    voided_quantity = models.DecimalField(**QTY, default=ZERO)
+    state = models.CharField(max_length=12)
+    waste = models.BooleanField(default=False)
+    void_reason = models.CharField(max_length=255, blank=True)
+    notes = models.CharField(max_length=255, blank=True)
+    sent_at = models.DateTimeField(null=True, blank=True)
+    served_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ['created_at']
+
+
+class OrderItemModifier(models.Model):
+    order_item = models.ForeignKey(OrderItem, on_delete=models.CASCADE, related_name='modifiers')
+    option = models.ForeignKey(ModifierOption, on_delete=models.SET_NULL, null=True, blank=True, related_name='+')
+    name = models.CharField(max_length=120)
+    price_delta = models.DecimalField(**MONEY, default=ZERO)
+
+
+class KitchenTicket(SyncModel):
+    order = models.ForeignKey(Order, on_delete=models.CASCADE, related_name='tickets')
+    station = models.ForeignKey(KitchenStation, on_delete=models.SET_NULL, null=True, blank=True, related_name='+')
+    number = models.CharField(max_length=30)
+    kind = models.CharField(max_length=8)  # new | void
+    sent_at = models.DateTimeField()
+    sent_by = models.CharField(max_length=150, blank=True)
+
+    class Meta:
+        ordering = ['sent_at']
+        indexes = [models.Index(fields=['shop', 'station', 'sent_at'])]
+
+
+class KitchenTicketItem(SyncModel):
+    ticket = models.ForeignKey(KitchenTicket, on_delete=models.CASCADE, related_name='items')
+    order_item = models.ForeignKey(OrderItem, on_delete=models.CASCADE, related_name='ticket_items')
+    quantity = models.DecimalField(**QTY)
+    voided_quantity = models.DecimalField(**QTY, default=ZERO)
+    state = models.CharField(max_length=12)
+    started_at = models.DateTimeField(null=True, blank=True)
+    ready_at = models.DateTimeField(null=True, blank=True)
+    served_at = models.DateTimeField(null=True, blank=True)
+
+
+class Bill(SyncModel):
+    order = models.OneToOneField(Order, on_delete=models.CASCADE, related_name='bill')
+    number = models.CharField(max_length=40)
+    status = models.CharField(max_length=10)
+    subtotal = models.DecimalField(**MONEY)
+    discount = models.DecimalField(**MONEY, default=ZERO)
+    discount_reason = models.CharField(max_length=255, blank=True)
+    net = models.DecimalField(**MONEY)
+    total = models.DecimalField(**MONEY)
+
+
+class BillCharge(models.Model):
+    """A service-charge or tax line, frozen as printed: the record of what was charged at what rate."""
+    bill = models.ForeignKey(Bill, on_delete=models.CASCADE, related_name='charges')
+    kind = models.CharField(max_length=20)  # service_charge | tax
+    tax_rule = models.ForeignKey(TaxRule, on_delete=models.SET_NULL, null=True, blank=True, related_name='+')
+    name = models.CharField(max_length=60)
+    rate = models.DecimalField(max_digits=7, decimal_places=4)
+    inclusive = models.BooleanField(default=False)
+    base = models.DecimalField(**MONEY)
+    amount = models.DecimalField(**MONEY)
+    sort = models.PositiveSmallIntegerField(default=0)
+
+    class Meta:
+        ordering = ['sort']
+
+
+class BillPayment(SyncModel):
+    """Money received on the hub. Tips are outside the bill (REQUIREMENTS §4)."""
+    bill = models.ForeignKey(Bill, on_delete=models.CASCADE, related_name='payments')
+    method = models.CharField(max_length=20)
+    amount = models.DecimalField(**MONEY)
+    tendered = models.DecimalField(**MONEY, null=True, blank=True)
+    change = models.DecimalField(**MONEY, default=ZERO)
+    tip = models.DecimalField(**MONEY, default=ZERO)
+    reference = models.CharField(max_length=100, blank=True)
+    shift_ref = models.UUIDField(null=True, blank=True, db_index=True)
+    received_by = models.CharField(max_length=150, blank=True)
+    received_at = models.DateTimeField()
+
+    class Meta:
+        ordering = ['received_at']
+
+
+class MenuAvailability(models.Model):
+    """The hub's sold-out switch for one business day. Recorded, never copied onto MenuItem: the
+    hub's flag rules for that day, and tomorrow the item is back (OFFLINE_SYNCHRONIZATION §4)."""
+    shop = models.ForeignKey('core.Shop', on_delete=models.CASCADE, related_name='+')
+    menu_item = models.ForeignKey(MenuItem, on_delete=models.CASCADE, related_name='availability')
+    business_date = models.DateField()
+    sold_out = models.BooleanField()
+    by = models.CharField(max_length=150, blank=True)
+    at = models.DateTimeField()
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=['menu_item', 'business_date'], name='one_availability_per_item_per_day')]
