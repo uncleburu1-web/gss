@@ -85,7 +85,7 @@ A task is `COMPLETED` only with evidence recorded.
 | REST-05 | Shared tax / service-charge engine (JS + Python, shared vectors) | gss, gssdesktop | gss `restaurant-billing` (PR #10), gssdesktop `restaurant-engine` (PR #7) | REVIEW_REQUIRED | REST-04 | Identical results in both languages, incl. the Lagos example in REQUIREMENTS §4 | 15 shared hand-computed vectors in both languages | Lagos example ₦58,800 in both; real-server E2E: hub bill = Python bill line for line (₦11,162.50); per-rule `applies_to_service_charge` replaces the conflicting global flag (migration `restaurant 0002`); gss restaurant 28/28, full suite 294/294 (with `modules` in every pull) | — | Owner reviews PR #10 and gssdesktop PR #7 |
 | REST-06 | Hub order engine T1–T13 + kitchen printing | gssdesktop | `restaurant-engine` (PR #7 → `restaurant`) | REVIEW_REQUIRED | REST-05 | Table-service workflow on the hub, tickets printed per station, everything offline | Till tests per transition, idempotency, restart | Till 173/173. Real-server E2E 18/18 with the server stopped during service. Only the branch's hub runs the restaurant (second till refused); restaurant audit entries wait on the hub for protocol 6 (today's cloud refused them). Printing tested with a stand-in window only: **no physical thermal printer tried yet** | Physical printer test needs the shop's hardware | Owner reviews PR #7; printer test in REST-09 |
 | REST-07 | Hub local server, screen pairing, kitchen screen (SSE) | gssdesktop | `restaurant-lan` (PR #8 → `restaurant-engine`) | REVIEW_REQUIRED | REST-06 | Screen shows and updates tickets live; catches up after a Wi-Fi drop; station isolation | Two-device LAN E2E | Till 178/178 (pairing, HTTP API, station isolation, live events, resume/resync, removal, lifecycle). Real Chromium as the screen, 18/18: pairing, live ticket, tap to cook, Wi-Fi drop with a void and a new order meanwhile then catch-up without reload, red after 20 min, second screen, "All ready", removal. Tested on one machine (browser and hub on 127.0.0.1), **not yet on two devices over Wi-Fi** | Windows Firewall asks once to allow the hub on the network | Test on the shop's Wi-Fi in REST-09; firewall step and QR code on the hub screens (REST-11) |
-| REST-08 | Cloud ingest (`order_doc`), `Sale` on close, restaurant reports | gss, gssdesktop | — | NOT_STARTED | REST-06 | A closed order arrives once with matching totals; Z-report and reports include it | Sync tests + E2E | Hub side done: closed orders wait on the hub until the cloud speaks protocol 6 (E2E checks nothing is sent at 5) | — | Cloud side: protocol 6, verify from frozen lines, `Sale(source='restaurant')`, taxes-collected report |
+| REST-08 | Cloud ingest (`order_doc`), `Sale` on close, restaurant reports | gss, gssdesktop | gss `restaurant-ingest` (PR #12 → `restaurant-billing`) | REVIEW_REQUIRED | REST-06 | A closed order arrives once with matching totals; Z-report and reports include it | Sync tests + E2E | gss 307/307 (13 ingest tests, mutation-checked). Real-server E2E 23/23: an order closed offline reaches the cloud once, as an order and a Sale of the same ₦11,162.50; restaurant summary and audit in the cloud; nothing failed. Supermarket till-e2e 15/15, till-outage 11/11 on the protocol-6 server; real-till upgrade SAFE | Food has no cost price yet (REST-10), so it shows its whole price as profit | Owner reviews PR #12 (after #10) |
 | REST-09 | Restaurant verification and release readiness (brief stages 9–10) | all | — | NOT_STARTED | REST-07, REST-08, REST-11, REST-12 | Acceptance criteria 1–10 in REQUIREMENTS §5 | Full workflow online, offline, with restarts; physical kitchen printer | — | — | — |
 | REST-11 | Hub restaurant screens: tables, order pad with modifiers, send, bill, payment, kitchen printers | gssdesktop | — | NOT_STARTED | REST-06 | A waiter/cashier runs table service and counter orders on the hub without training notes | Browser-driven E2E on the packaged app | Engine and IPC ready (`window.pos.restaurant(...)`) | — | After REST-07 |
 | REST-12 | Web set-up screens for the restaurant (menu, modifiers, tables, stations, taxes, service charge, hub) | gssfrontend, gssandriod | — | NOT_STARTED | REST-04 | Owner sets a restaurant up without the API | Web E2E | API ready (REST-04) | — | — |
@@ -149,7 +149,7 @@ scripts in `gssdesktop/e2e/` and `gssfrontend/e2e/`.
 | Stage 8–9 | `SaleReturn`, `SaleReturnLine`; `StockTransfer`, `StockTransferLine` |
 | Stage 10 | `Promotion` |
 | Stage 11 | `InventoryItem.sold_by_weight`; quantity columns → `Decimal(12,3)` (`inventory 0010`, `repairs 0003`, `sales 0012`) |
-| `restaurant` branch only (not on `main`, not deployed) | `core 0010–0011` `BranchModule` (+ data: every branch gets retail, gadgets shops also service); `subscriptions 0003–0004` `Package`, `Subscription.package`; `staff 0004` cashier/waiter/kitchen roles; `restaurant 0001` configuration models; `restaurant 0002` drops `RestaurantSettings.service_charge_taxable` (never released; replaced by the per-rule flag) |
+| `restaurant` branch only (not on `main`, not deployed) | `core 0010–0011` `BranchModule` (+ data: every branch gets retail, gadgets shops also service); `subscriptions 0003–0004` `Package`, `Subscription.package`; `staff 0004` cashier/waiter/kitchen roles; `restaurant 0001` configuration models; `restaurant 0002` drops `RestaurantSettings.service_charge_taxable` (never released; replaced by the per-rule flag); `restaurant 0003` creates the finished-order tables (Order, OrderItem, OrderItemModifier, KitchenTicket, KitchenTicketItem, Bill, BillCharge, BillPayment, MenuAvailability) |
 
 No migration has dropped data. Backups before releases are manual `pg_dump` (Railway plan has none).
 
@@ -181,9 +181,11 @@ ONLINE/STALE/OFFLINE.
 Version 5. Op types: `product`, `stock_batch`, `customer`, `sale`, `sale_item`, `sale_doc`,
 `sale_payment`, `shift`, `cash_movement`, `stock_movement`, `audit_event`, `sale_return`.
 
-Planned 6 (REST-08): `order_doc`, a closed restaurant order in one piece. The hub already holds
-closed orders until the cloud reports 6 and then queues them (`reconcileOrders`). Restaurant
-configuration comes down as opt-in pull types, asked for by name, only on restaurant branches.
+Version 6 on the `restaurant-ingest` branch (gss PR #12, not deployed). It adds `order_doc` (a
+finished restaurant order in one piece), `menu_availability`, and restaurant audit actions, all only
+from the branch's hub. The hub holds finished orders and its audit entries until the cloud reports 6,
+then queues them (`reconcileOrders`). Restaurant configuration comes down as opt-in pull types, asked
+for by name, only on restaurant branches; every pull also says which modules the branch uses.
 
 ## 6. Roadmap (owner's order, 21 Oct 2026)
 
@@ -329,3 +331,35 @@ workflow passes (REST-09).
   - Tests: till 178/178, and real Chromium as the kitchen screen 18/18, including a Wi-Fi drop and catching up without a reload.
   - Not yet tried on two physical devices over Wi-Fi.
 - **Test fault caught:** a restaurant test read the outbox in random-id order and passed or failed by chance. It now reads in queue order. The engine was not affected.
+
+### 22 Oct 2026 — the cloud receives finished orders (REST-08)
+
+- **Built (not deployed):** gss PR #12, stacked on #10.
+  - The cloud takes a finished order from the hub once, in one transaction.
+  - It checks the sender is the branch's hub, that everything named belongs to the branch, and that
+    the bill adds up from the document's own frozen pricing, never from today's settings.
+  - A closed order also becomes a Sale. Its lines add up to the bill, and it moves no stock.
+  - Sold-out switches and restaurant audit entries are accepted from the hub.
+  - New restaurant orders list, order detail and summary report.
+  - Sync protocol 5 → 6.
+- **Found and fixed on the hub first (gssdesktop PR #7):** an order's service charge and tax rates
+  were not frozen. Any bill refresh used the latest settings, so a change in the cloud during service
+  would have changed a printed bill. Each order now keeps the pricing it opened with. Real-server
+  E2E: a service charge changed mid-service leaves the open table at 10%; the next table gets 15%.
+- **Reports kept honest:**
+  - A restaurant tax line counts as zero profit.
+  - Item and category reports leave the bill's charges out.
+  - The tax report takes restaurant taxes from the frozen bill lines, instead of calling restaurant
+    food zero-rated.
+- **Tests run (actual):**
+  - gss full suite 307/307. The 13 ingest tests fail when the bill check or the hub check is
+    removed.
+  - gssdesktop 179/179 (`restaurant-lan`).
+  - Restaurant E2E against the protocol-6 server 23/23.
+  - Supermarket till-e2e 15/15 and till-outage 11/11 against the same server.
+  - Real-till upgrade check SAFE.
+  - Migration `restaurant 0003` forward, back and forward on a used database.
+- **Known limits:** food has no cost price until REST-10; the cloud's live view of open orders
+  (`order_snapshot`) is not built.
+- **Review order for the owner:** gss #10 → #12; gssdesktop #7 → #8. Then the screens (REST-11,
+  REST-12), then REST-09 on the shop's hardware.
