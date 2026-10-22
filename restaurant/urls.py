@@ -1,7 +1,7 @@
 from django.urls import path
 from rest_framework.routers import DefaultRouter
 
-from . import views
+from . import reports, views
 
 router = DefaultRouter()
 router.register(r'restaurant/areas', views.DiningAreaViewSet, basename='restaurant-area')
@@ -20,4 +20,7 @@ urlpatterns = [
     path('restaurant/settings/', views.RestaurantSettingsView.as_view(), name='restaurant-settings'),
     path('restaurant/settings/hub/', views.HubDeviceView.as_view(), name='restaurant-hub'),
     path('restaurant/routing/preview/', views.RoutingPreviewView.as_view(), name='restaurant-routing-preview'),
+    path('restaurant/orders/', reports.OrderListView.as_view(), name='restaurant-orders'),
+    path('restaurant/orders/<uuid:pk>/', reports.OrderDetailView.as_view(), name='restaurant-order'),
+    path('reports/restaurant/summary/', reports.RestaurantSummaryView.as_view(), name='restaurant-summary'),
 ] + router.urls
