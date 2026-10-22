@@ -79,7 +79,10 @@ class DeviceListView(APIView):
     this shop, and whether each is currently considered online."""
 
     def get(self, request):
-        shop = get_shop_for_user(request.user)
+        # A CEO with several branches names the one being viewed (X-Branch-ID, the web's branch
+        # switcher); without it get_shop_for_user refuses, which left those CEOs unable to see any
+        # paired till.
+        shop = get_shop_for_user(request.user, branch_id=request.headers.get('X-Branch-ID') or None)
         devices = Device.objects.filter(shop=shop, is_deleted=False)
         return Response(DeviceSerializer(devices, many=True).data)
 
@@ -96,7 +99,7 @@ class DeviceDetailView(APIView):
     permission_classes = [IsOwner]
 
     def delete(self, request, pk):
-        shop = get_shop_for_user(request.user)
+        shop = get_shop_for_user(request.user, branch_id=request.headers.get('X-Branch-ID') or None)
         device = Device.objects.filter(id=pk, shop=shop, is_deleted=False).first()
         if device is None:
             return Response({'detail': 'Device not found.'}, status=404)
