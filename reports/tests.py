@@ -156,3 +156,76 @@ class LiabilityAnalyticsTests(TestCase):
         # nothing is actually still owed on it.
         self.assertNotIn('rent', analytics_res.data['by_category'])
         self.assertEqual(Decimal(analytics_res.data['by_category']['supplier_credit']), Decimal('8000.00'))
+
+
+class ReportsWithWeighedQuantitiesTests(TestCase):
+    """Since stage 11 quantities are Decimals (kg to the gram). Two reports mixed them with floats and
+    crashed in production for any shop with sales or stock (22 Oct 2026): sales-by-item and
+    inventory-valuation. These numbers are hand-computed."""
+
+    def setUp(self):
+        self.org = Organization.objects.create(name='Weighed Shop', business_type='general')
+        self.shop = Shop.objects.create(name='Weighed Shop', organization=self.org)
+        self.user = User.objects.create_user(username='owner_wq', password='x')
+        self.org.owner = self.user
+        self.org.save()
+        Worker.objects.create(user=self.user, full_name='Owner', role='owner', shop=self.shop)
+        self.client = APIClient()
+        self.client.force_authenticate(user=self.user)
+        widget = InventoryItem.objects.create(shop=self.shop, name='Widget', sell_price=Decimal('1000'))
+        StockBatch.objects.create(shop=self.shop, item=widget, batch_number='W1', quantity_received=10, quantity_remaining=10,
+                                  cost_price=Decimal('400'), selling_price=Decimal('1000'))
+        rice = InventoryItem.objects.create(shop=self.shop, name='Rice (loose)', sell_price=Decimal('1200'), sold_by_weight=True, unit='KG')
+        StockBatch.objects.create(shop=self.shop, item=rice, batch_number='R1', quantity_received=Decimal('5.000'),
+                                  quantity_remaining=Decimal('5.000'), cost_price=Decimal('800'), selling_price=Decimal('1200'))
+        r = self.client.post('/api/sales/', {'customer_name': 'Walk-in', 'payment_method': 'cash', 'status': 'completed', 'items': [
+            {'item': str(widget.id), 'item_name': 'Widget', 'category': '', 'quantity': 2, 'unit_price': '1000.00', 'unit_cost': 0},
+            {'item': str(rice.id), 'item_name': 'Rice (loose)', 'category': '', 'quantity': '1.250', 'unit_price': '1200.00', 'unit_cost': 0},
+        ]}, format='json')
+        assert r.status_code == 201, r.content
+        self.month = timezone.localdate().strftime('%Y-%m')
+
+    def test_sales_by_item_with_a_weighed_line(self):
+        r = self.client.get(f'/api/reports/sales-by-item/?month={self.month}')
+        self.assertEqual(r.status_code, 200, r.content[:300])
+        rows = {row['item_name']: row for row in (r.json()['rows'] if isinstance(r.json(), dict) else r.json())}
+        self.assertAlmostEqual(float(rows['Rice (loose)']['total_sold']), 1.25)
+        self.assertAlmostEqual(rows['Rice (loose)']['gross_sale_amt'], 1500.0)
+        self.assertAlmostEqual(rows['Rice (loose)']['cost_price'], 800.0)  # 1.25 kg cost 1,000 -> 800 a kg
+        self.assertAlmostEqual(rows['Widget']['cost_price'], 400.0)
+
+    def test_inventory_valuation_with_weighed_stock(self):
+        r = self.client.get('/api/reports/inventory-valuation/')
+        self.assertEqual(r.status_code, 200, r.content[:300])
+        body = r.json()
+        rows = {row['item_name']: row for row in body['rows']}
+        self.assertAlmostEqual(float(rows['Rice (loose)']['in_stock']), 3.75)
+        self.assertAlmostEqual(rows['Rice (loose)']['inventory_value'], 3000.0)  # 3.75 kg x 800
+        self.assertAlmostEqual(rows['Widget']['inventory_value'], 3200.0)        # 8 x 400
+        self.assertAlmostEqual(body['total_inventory_value'], 6200.0)
+
+    def test_no_api_page_crashes_on_a_shop_with_weighed_sales_and_stock(self):
+        """Every GET endpoint without an id in its path, with and without a period: none may answer 500.
+        A 4xx (not allowed, needs a parameter) is fine here; a crash is not."""
+        from django.test import Client
+        from django.urls import URLPattern, URLResolver, get_resolver
+
+        def walk(patterns, prefix=''):
+            for p in patterns:
+                route = prefix + str(p.pattern)
+                if isinstance(p, URLResolver):
+                    yield from walk(p.url_patterns, route)
+                elif isinstance(p, URLPattern):
+                    yield route
+
+        paths = sorted({'/' + r.lstrip('^').rstrip('$') for r in walk(get_resolver().url_patterns)
+                        if r.startswith('api/') and '<' not in r and '(?P' not in r and '\\' not in r and 'format' not in r})
+        self.assertGreater(len(paths), 40)
+        from rest_framework_simplejwt.tokens import RefreshToken
+        client = Client(raise_request_exception=False, HTTP_AUTHORIZATION=f'Bearer {RefreshToken.for_user(self.user).access_token}')
+        crashed = []
+        for path in paths:
+            for query in ('', f'?month={self.month}'):
+                if client.get(path + query).status_code >= 500:
+                    crashed.append(path + query)
+        self.assertEqual(crashed, [])

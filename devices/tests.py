@@ -87,3 +87,39 @@ class RepairAfterRemovalTests(TestCase):
         device.refresh_from_db()
         self.assertFalse(device.is_deleted)
         self.assertEqual(device.shop, shop)
+
+
+class MultiBranchCeoDeviceListTests(TestCase):
+    """A CEO with several branches sees one branch's tills at a time, the one named by X-Branch-ID
+    (the web's branch switcher). Before, the list ignored the header and refused every such CEO."""
+
+    def setUp(self):
+        self.ceo = User.objects.create_user(username='ceo-multi', password='x')
+        org = Organization.objects.create(name='Two Shops', owner=self.ceo, business_type='general')
+        self.ikeja = Shop.objects.create(name='Ikeja', organization=org)
+        self.lekki = Shop.objects.create(name='Lekki', organization=org)
+        Worker.objects.create(user=self.ceo, full_name='Chief', role='owner', shop=self.ikeja)
+        self.till_ikeja = Device.objects.create(shop=self.ikeja, device_type='desktop', name='Ikeja till')
+        self.till_lekki = Device.objects.create(shop=self.lekki, device_type='desktop', name='Lekki till')
+        _, self.other_shop = make_shop_user('stranger', 'Elsewhere')
+
+    def test_the_branch_named_in_the_header_is_listed(self):
+        client = client_for(self.ceo)
+        r = client.get('/api/devices/', HTTP_X_BRANCH_ID=str(self.lekki.id))
+        self.assertEqual(r.status_code, 200, r.content)
+        self.assertEqual([d['name'] for d in r.json()], ['Lekki till'])
+        r = client.get('/api/devices/', HTTP_X_BRANCH_ID=str(self.ikeja.id))
+        self.assertEqual([d['name'] for d in r.json()], ['Ikeja till'])
+
+    def test_another_business_branch_is_never_listed(self):
+        r = client_for(self.ceo).get('/api/devices/', HTTP_X_BRANCH_ID=str(self.other_shop.id))
+        self.assertIn(r.status_code, (403, 404))
+
+    def test_removing_a_till_in_the_branch_being_viewed(self):
+        client = client_for(self.ceo)
+        r = client.delete(f'/api/devices/{self.till_lekki.id}/', HTTP_X_BRANCH_ID=str(self.lekki.id))
+        self.assertIn(r.status_code, (200, 204), r.content)
+        self.till_lekki.refresh_from_db()
+        self.assertTrue(self.till_lekki.is_deleted)
+        r = client.delete(f'/api/devices/{self.till_ikeja.id}/', HTTP_X_BRANCH_ID=str(self.lekki.id))
+        self.assertEqual(r.status_code, 404, 'a till of another branch is not found in this one')

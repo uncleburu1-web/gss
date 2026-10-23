@@ -113,9 +113,10 @@ class SalesByItemView(APIView):
         grouped = defaultdict(lambda: {'total_sold': 0, 'gross_sale_amt': 0.0, 'cost_total': 0.0, 'gross_profit': 0.0, 'discount': 0.0, 'category': ''})
         for s in qs:
             g = grouped[s.item_name]
-            g['total_sold'] += s.quantity
+            g['total_sold'] += float(s.quantity)  # a Decimal since stage 11; everything here is float
             g['gross_sale_amt'] += float(s.total)
-            g['cost_total'] += float(s.unit_cost) * s.quantity
+            # quantity is a Decimal since stage 11 (kg to the gram): float it before mixing with floats
+            g['cost_total'] += float(s.unit_cost) * float(s.quantity)
             g['gross_profit'] += float(s.profit)
             g['discount'] += float(s.discount)
             g['category'] = s.category
@@ -127,7 +128,7 @@ class SalesByItemView(APIView):
             rows.append({
                 'item_name': name,
                 'category': g['category'],
-                'total_sold': g['total_sold'],
+                'total_sold': round(g['total_sold'], 3),  # kg to the gram
                 'gross_sale_amt': g['gross_sale_amt'],
                 'cost_price': cost_price,
                 'gross_profit': g['gross_profit'],
@@ -324,7 +325,7 @@ class InventoryValuationView(APIView):
         total_selling_value = 0.0
 
         for i in items:
-            qty = i.quantity
+            qty = float(i.quantity)  # a Decimal sum of batches (weighed items have grams); 0 when none
             cost = float(i.cost_price)
             sell = float(i.sell_price)
             inv_value = qty * cost
