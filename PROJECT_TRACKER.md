@@ -1,7 +1,7 @@
 # Benchline project tracker
 
 The single source of truth for where Benchline stands. A new session should be able to resume from
-this file alone. Last updated **23 Oct 2026 (morning)**.
+this file alone. Last updated **23 Oct 2026 (late morning)**.
 
 | Detail | Where |
 | --- | --- |
@@ -91,6 +91,7 @@ A task is `COMPLETED` only with evidence recorded.
 | REST-11 | Hub restaurant screens: tables, order pad with modifiers, send, bill, payment, kitchen printers | gssdesktop | gssdesktop `restaurant` (PR #9 merged 22 Oct) | TESTING | REST-06 | A waiter/cashier runs table service and counter orders on the hub without training notes | Browser-driven E2E | Till 180/180. The built renderer in real Chromium against the real engine: 27/27 (table, choices, send, serve rules, READY on the floor from a kitchen screen, bill ₦8,225.00 printed, cash change, receipt, unprinted tickets, station printer, pairing, sold out, waiter permissions, not-the-hub) | Electron itself not launched here (no display); QR code for pairing not built | Final check in REST-09 |
 | REST-12 | Web set-up screens for the restaurant (menu, modifiers, tables, stations, taxes, service charge, hub) | gssfrontend, gssandriod | gssfrontend `restaurant` (PR #6 merged 22 Oct) | TESTING | REST-04 | Owner sets a restaurant up without the API | Web E2E | Web done: per-branch modules in Settings; Restaurant page (menu, choices, tables, kitchen stations, service charge, taxes with the activation safeguards, hub till, restaurant reports) following the branch being viewed. `e2e/restaurant.e2e.cjs`, real Chromium against a real server: 23/23, twice (the CEO sets up a second branch through the forms, the database holds exactly that; the first branch's report shows the hub's ₦11,162.50 order). Found and fixed: a double settings load reset the service charge to 0; lists now follow pages; devices list ignored the branch switcher (gss #16) | Phone app (gssandriod) has no restaurant set-up yet | Final check in REST-09 |
 | REST-13 | Restaurant as a shop type (decision 13): "Restaurant & food" next to Gadgets, Clothing, Pharmacy, General at signup and when adding a branch; the branch's type sets its modules and categories; Settings shows the type instead of loose module switches | gss, gssfrontend, gssandriod, gssdesktop | gss, gssfrontend, gssandriod, gssdesktop `restaurant` (gss #17, gssfrontend #6, gssandriod #6, gssdesktop #9: all merged 22 Oct) | TESTING | REST-12 | A new restaurant owner signs up as a restaurant and lands on the restaurant set-up; a business can add a restaurant branch beside a shop; existing businesses unchanged | Signup and add-branch tests on web and phone; migration on a production copy | `Shop.shop_type` per branch (ADR-025); kind decides modules (gadgets retail+service, restaurant retail+restaurant, rest retail); CEO changes a branch's kind (audited, package-checked, nothing deleted); `/me` follows the branch. gss 322/322 (15 new). Real server, two fresh DBs, twice: hub 23/23, web restaurant 29/29, restaurant sign-up 9/9, phone 10/10, supermarket till 15/15. Migration checked on a database with every kind: modules identical before/after, reversible | Not tried on a copy of production data (no access from here); phone has no restaurant screens (points to the web) | Final check in REST-09 |
+| REST-14 | Restaurant-first app for restaurant branches (owner, 23 Oct): own sidebar (Menu, Tables, Kitchen, Stock, Reports, Taxes & charges, Hub till; no shop selling, repairs or promotions, no separate Restaurant page), restaurant takings inside Reports, restaurant dashboard, restaurant roles in Workers | gss, gssfrontend, gssandriod | gss `restaurant-roles` (PR #19), gssfrontend `restaurant-nav` (PR #8), gssandriod `restaurant-nav` (PR #7), all → `restaurant` | REVIEW_REQUIRED | REST-13 | An owner of a restaurant branch never sees shop screens; staff roles are a restaurant's | Browser E2E on web and phone | gss 326/326 (roles per kind in /me; waiters/cashiers/kitchen refused outside a restaurant). Real server, three fresh databases: hub 23/23, web 34/34, sign-up 9/9, phone 15/15 | The hub till app still shows Restaurant as one screen among the shop's (not changed here); phone has no menu/table set-up (points to the web) | Owner reviews gss #19, gssfrontend #8, gssandriod #7; then the test copy rebuilds by itself |
 | QA-01 | Run web E2E in CI | gssfrontend | — | NOT_STARTED | — | Every PR runs the browser E2E against a throwaway Postgres | CI | — | — | — |
 | QA-02 | Tests for Paystack payments and repairs | gss | — | NOT_STARTED | — | Paystack success/failure/duplicate webhook and repair flows covered | Django tests | `repairs/tests.py` has 0 tests | — | — |
 | QA-03 | CI check that shared JS files are identical in every repo | all | — | NOT_STARTED | — | A PR that changes `promotions.js` (later `tax.js`) in one repo only fails | CI | Decision 2 | — | — |
@@ -444,3 +445,18 @@ workflow passes (REST-09).
 - **Not yet seen:** the debug page switch (OPS-06; the setting is applied, the page could not be
   opened from here) and the shop's till reporting 1.0.23 (OPS-01; no till has synced since the deploy).
 - **Tracker fix:** the REST-13 tracker update was pushed after #14 was merged and is carried in this PR.
+
+### 23 Oct 2026 (late morning) — test copy online; restaurant-first app (REST-14)
+
+- **Test copy (owner approved):** a separate Railway project, `benchline-restaurant-test`, with its own
+  empty Postgres, runs the `restaurant` branches of gss and gssfrontend
+  (https://gssfrontend-test.up.railway.app). Production is untouched. Sign-up codes are only logged
+  there (no email key); Claude reads them from the logs. Delete the project after REST-09.
+- **Missed merges found:** gssfrontend #6 and gssdesktop #9 had been merged before their last commits
+  were pushed, so the REST-13 web dropdown and the till's restaurant categories never reached
+  `restaurant`. Catch-up PRs gssfrontend #7 (merged) and gssdesktop #11. Rule kept from now on: check a
+  PR is still open before pushing to its branch.
+- **Owner's feedback:** a restaurant branch looked like a shop with a Restaurant page added. Built
+  REST-14 (see the table): its own sidebar, takings in Reports, its own dashboard, restaurant roles.
+- **Tests run (actual):** gss 326/326; hub 23/23, web 34/34, sign-up 9/9, phone 15/15 on three fresh
+  databases.
