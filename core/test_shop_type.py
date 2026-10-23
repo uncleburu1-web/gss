@@ -182,3 +182,44 @@ class BranchTypeTests(TestCase):
         self.assertEqual((me['business_type'], me['organization_business_type'], me['service_enabled']), ('restaurant', 'gadgets', False))
         self.assertEqual(me['branch_types'], {str(branch.id): 'restaurant'}, 'a branch manager sees only their branch')
         self.assertIn('ingredient', [c['value'] for c in me['available_categories']])
+
+
+class RolesTests(TestCase):
+    """A restaurant hires waiters, cashiers and kitchen staff; a shop hires sellers and the like."""
+
+    def setUp(self):
+        self.org, self.shop, self.ceo = make_business('Chidi', business_type='gadgets')
+        paid(self.org, 'retail_restaurant')
+        r = client_for(self.ceo).post('/api/branches/', {'name': 'Chidi Kitchen', 'shop_type': 'restaurant'}, format='json')
+        self.kitchen = Shop.objects.get(pk=r.json()['id'])
+
+    def add(self, branch, role, **extra):
+        return client_for(self.ceo, branch).post('/api/workers/', {'full_name': f'{role} {uuid.uuid4().hex[:4]}', 'role': role, **extra}, format='json')
+
+    def test_me_lists_the_roles_each_kind_offers(self):
+        types = {t['value']: t for t in client_for(self.ceo).get('/api/me/').json()['shop_types']}
+        self.assertEqual([r['value'] for r in types['restaurant']['roles']], ['waiter', 'cashier', 'kitchen', 'other'])
+        self.assertEqual([r['value'] for r in types['gadgets']['roles']], ['seller', 'reception', 'technician', 'attendant', 'other'])
+        self.assertEqual(types['restaurant']['roles'][0]['label'], 'Waiter (restaurant)')
+
+    def test_restaurant_staff_are_added_to_the_restaurant(self):
+        for role in ('waiter', 'cashier', 'kitchen'):
+            r = self.add(self.kitchen, role)
+            self.assertEqual(r.status_code, 201, r.content)
+        self.assertEqual(self.kitchen.workers.filter(role__in=['waiter', 'cashier', 'kitchen']).count(), 3)
+
+    def test_a_shop_cannot_take_a_waiter(self):
+        r = self.add(self.shop, 'waiter')
+        self.assertEqual(r.status_code, 400)
+        self.assertIn('restaurant branch', r.json()['role'][0])
+        self.assertEqual(self.add(self.shop, 'seller').status_code, 201, 'shop roles as before')
+
+    def test_changing_a_shop_worker_into_a_waiter_is_refused_but_other_edits_are_not(self):
+        seller = self.add(self.shop, 'seller').json()
+        r = client_for(self.ceo, self.shop).patch(f"/api/workers/{seller['id']}/", {'role': 'waiter'}, format='json')
+        self.assertEqual(r.status_code, 400)
+        # A waiter whose branch stopped being a restaurant can still be edited (role unchanged).
+        waiter = self.add(self.kitchen, 'waiter').json()
+        client_for(self.ceo).patch(f'/api/branches/{self.kitchen.id}/', {'shop_type': 'general'}, format='json')
+        r = client_for(self.ceo, self.kitchen).patch(f"/api/workers/{waiter['id']}/", {'phone': '0800'}, format='json')
+        self.assertEqual(r.status_code, 200, r.content)

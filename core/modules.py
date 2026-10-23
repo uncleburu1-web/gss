@@ -24,6 +24,18 @@ TYPE_MODULES = {
 }
 
 
+# The worker roles each kind of shop offers when adding staff (owner's request, 23 Oct 2026: a
+# restaurant hires waiters, cashiers and kitchen staff, not sellers and technicians). The owner and
+# the branch manager come from sign-up and Settings -> Branches, not from this list.
+RESTAURANT_ROLES = ['waiter', 'cashier', 'kitchen']
+SHOP_ROLES = ['seller', 'reception', 'technician', 'attendant']
+TYPE_ROLES = {'restaurant': RESTAURANT_ROLES + ['other']}
+
+
+def type_roles(shop_type):
+    return TYPE_ROLES.get(shop_type, SHOP_ROLES + ['other'])
+
+
 def type_modules(shop_type):
     return TYPE_MODULES.get(shop_type, [RETAIL])
 

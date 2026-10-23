@@ -16,7 +16,7 @@ from core.models import SHOP_TYPE_CHOICES, Shop, Organization, EmailOTP
 from core.permissions import is_ceo, IsCeo
 from core.capabilities import capabilities_for_user, effective_role_permissions, CAPABILITIES, CONFIGURABLE_ROLES
 from core.utils import get_shop_for_user, get_shops_for_user, get_organization_for_user
-from core.modules import branch_modules, organization_features, type_modules
+from core.modules import branch_modules, organization_features, type_modules, type_roles
 from core.auth_serializers import DeviceAwareTokenObtainPairSerializer
 from core.email_utils import send_otp_email
 from devices.models import Device
@@ -307,8 +307,12 @@ class MeView(APIView):
 
 
 def _shop_types_info():
+    from staff.models import Worker
+    role_labels = dict(Worker.ROLE_CHOICES)
     return [{'value': value, 'label': label, 'modules': type_modules(value),
-             'categories': InventoryItem.category_choices_for(value)} for value, label in SHOP_TYPE_CHOICES]
+             'categories': InventoryItem.category_choices_for(value),
+             'roles': [{'value': r, 'label': role_labels[r]} for r in type_roles(value)]}
+            for value, label in SHOP_TYPE_CHOICES]
 
 
 def _branch_types_map(user):

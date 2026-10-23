@@ -1,7 +1,7 @@
 from django.utils import timezone
 from rest_framework import viewsets, filters
 from rest_framework.decorators import action
-from rest_framework.exceptions import PermissionDenied
+from rest_framework.exceptions import PermissionDenied, ValidationError
 from rest_framework.response import Response
 from django_filters.rest_framework import DjangoFilterBackend
 
@@ -21,7 +21,18 @@ class WorkerViewSet(ShopScopedMixin, viewsets.ModelViewSet):
     filterset_fields = ['role', 'is_active']
     search_fields = ['full_name', 'phone']
 
+    @staticmethod
+    def _check_role_fits_branch(role, shop):
+        """Waiters, cashiers and kitchen staff work the restaurant hub: refuse them in a branch without
+        the restaurant (a shop till has no orders to take). Any other role is as before."""
+        from core import modules
+        if role in modules.RESTAURANT_ROLES and not modules.has_module(shop, modules.RESTAURANT):
+            raise ValidationError({'role': ['Waiters, cashiers and kitchen staff work in a restaurant branch, and this branch '
+                                            'is not a restaurant. Pick another role, or make the branch a restaurant in '
+                                            'Settings \u2192 Branches.']})
+
     def perform_create(self, serializer):
+        self._check_role_fits_branch(serializer.validated_data.get('role'), self.get_current_shop())
         super().perform_create(serializer)
         w = serializer.instance
         import audit
@@ -29,6 +40,9 @@ class WorkerViewSet(ShopScopedMixin, viewsets.ModelViewSet):
                      summary=f'Added {w.full_name} as {w.role}')
 
     def perform_update(self, serializer):
+        new_role = serializer.validated_data.get('role')
+        if new_role and new_role != serializer.instance.role:
+            self._check_role_fits_branch(new_role, serializer.instance.shop)
         before = {'role': serializer.instance.role, 'is_active': serializer.instance.is_active}
         super().perform_update(serializer)
         w = serializer.instance
