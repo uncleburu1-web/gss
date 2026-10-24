@@ -240,3 +240,22 @@ Context for all of them: [`docs/architecture/CURRENT_ARCHITECTURE.md`](docs/arch
   cloud services only.
 - **Open.** Add-on price of the restaurant package(s).
 - **Status.** Accepted (decision); design in `docs/architecture/TARGET_ARCHITECTURE.md` §1.
+
+## ADR-025 Each branch has a shop type; a restaurant is one of them
+
+- **Decision (owner, 22 Oct 2026, decision 13).** A restaurant is a kind of shop, picked the same way
+  as Gadgets, Clothing, Pharmacy and General retail, not a feature switched on later. With decision 4
+  (one business can mix branches), the type belongs to the **branch**.
+- **Design.** `Shop.shop_type` (gadgets / clothing / pharmacy / restaurant / general). Sign-up sets the
+  first branch's type (`Organization.business_type` stays as the sign-up choice and the default for
+  new branches); adding a branch asks for its type. The type decides the branch's modules
+  (`core.modules.TYPE_MODULES`: gadgets = retail + service, restaurant = retail + restaurant, the
+  rest retail) and its stock categories. Changing a branch's type (CEO only) switches its modules to
+  the new type's, audited as `branch.type_changed`; nothing recorded is deleted. A type that needs a
+  module the package lacks is refused (403 `not_in_package`); leaving a type is always allowed.
+  `BranchModule` stays the record of what is switched on (ADR-019), and its API stays for support.
+- **Compatibility.** Migration `core 0012` gives every existing branch its business's sign-up type,
+  so no existing branch changes modules, categories or screens. `/api/me` keeps its fields and now
+  reports the user's own branch's type; it adds `branch_types` and `shop_types` for clients that
+  show several branches.
+- **Status.** Accepted.

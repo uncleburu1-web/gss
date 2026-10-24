@@ -48,6 +48,7 @@ INSTALLED_APPS = [
     'customers',
     'realtime',
     'branches',
+    'restaurant',
 ]
 
 MIDDLEWARE = [

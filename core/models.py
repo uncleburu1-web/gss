@@ -7,6 +7,19 @@ from django.db import models
 from django.utils import timezone
 
 
+# What kind of shop a branch is. Picked at sign-up for the first branch and again for every branch
+# added later, so one business can run, say, a gadget shop and a restaurant side by side (owner's
+# decisions 4 and 13). The type decides which modules a branch starts with (core.modules.TYPE_MODULES)
+# and which stock categories it is offered (inventory.models.InventoryItem.CATEGORY_GROUPS).
+SHOP_TYPE_CHOICES = [
+    ('gadgets', 'Gadgets & electronics (phones, laptops, accessories)'),
+    ('clothing', 'Clothing & fashion'),
+    ('pharmacy', 'Pharmacy & health products'),
+    ('restaurant', 'Restaurant & food (restaurant, café, bar, fast food)'),
+    ('general', 'General retail / other'),
+]
+
+
 class Organization(models.Model):
     """The top of the hierarchy: Organization -> Branch (Shop) -> business
     records. One Organization per paying customer/CEO. A solo shop owner
@@ -15,12 +28,9 @@ class Organization(models.Model):
     have one branch instead of several. See Shop below for why the
     existing `shop` FK name is kept everywhere rather than renamed.
     """
-    BUSINESS_TYPE_CHOICES = [
-        ('gadgets', 'Gadgets & electronics (phones, laptops, accessories)'),
-        ('clothing', 'Clothing & fashion'),
-        ('pharmacy', 'Pharmacy & health products'),
-        ('general', 'General retail / other'),
-    ]
+    # The type picked at sign-up. Each branch now has its own type (Shop.shop_type); this one is what
+    # the first branch was and the default for branches added later.
+    BUSINESS_TYPE_CHOICES = SHOP_TYPE_CHOICES
     # Which business types get device-repair tracking (tickets, diagnosis,
     # parts, repair payments). A clothing or general retail shop has no use
     # for a "Repairs" tab at all -- this is the single source of truth the
@@ -40,7 +50,8 @@ class Organization(models.Model):
     name = models.CharField(max_length=200)
     business_type = models.CharField(
         max_length=20, choices=BUSINESS_TYPE_CHOICES, default='general',
-        help_text='Set once at signup. Drives which optional modules (like Repairs) are shown.',
+        help_text='Picked at signup: the first branch\'s type and the default for new branches. Each branch\'s '
+                  'own type is Shop.shop_type.',
     )
     owner = models.ForeignKey(
         settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='owned_organizations',
@@ -134,6 +145,14 @@ class Shop(models.Model):
         'staff.Worker', on_delete=models.SET_NULL, null=True, blank=True, related_name='managed_branches',
     )
     status = models.CharField(max_length=10, choices=STATUS_CHOICES, default='active')
+    shop_type = models.CharField(
+        # db_default as well: code from before this column existed (a rolled-back deploy) can still
+        # create branches; save() below then fills the type in on the next save.
+        max_length=20, choices=SHOP_TYPE_CHOICES, blank=True, default='', db_default='',
+        help_text='What kind of shop this branch is (gadgets, pharmacy, restaurant, ...). Left empty, it '
+                  'takes the business\'s sign-up type when saved. Changing it changes the branch\'s modules '
+                  '(branches.views.BranchViewSet.perform_update).',
+    )
     opening_date = models.DateField(null=True, blank=True)
     timezone = models.CharField(max_length=50, default='Africa/Lagos')
     currency = models.CharField(max_length=10, default='NGN')
@@ -161,6 +180,17 @@ class Shop(models.Model):
 
     def __str__(self):
         return self.name
+
+    def save(self, *args, **kwargs):
+        # Every path that creates a branch without naming its type (older clients, the admin, tests)
+        # gets what a branch always was: the business's sign-up type.
+        if not self.shop_type:
+            self.shop_type = self.organization.business_type if self.organization_id else 'general'
+        super().save(*args, **kwargs)
+
+    @property
+    def shop_type_label(self):
+        return dict(SHOP_TYPE_CHOICES).get(self.shop_type, self.shop_type)
 
     @property
     def is_operational(self):
@@ -305,3 +335,29 @@ class IdempotencyRecord(models.Model):
 
     class Meta:
         constraints = [models.UniqueConstraint(fields=['user', 'key'], name='uniq_idempotency_user_key')]
+
+
+class BranchModule(models.Model):
+    """Which parts of Benchline a branch uses: `retail` (the supermarket POS), `restaurant`, `service`
+    (repairs). One business can mix branch kinds (owner's decision 4, 21 Oct 2026); the package the
+    business pays for decides which modules it may switch on (core.modules.can_enable).
+
+    A table rather than a field on Shop: a branch can run more than one module, every switch is a row
+    with who and when, and new modules need no migration. See docs/architecture/TARGET_ARCHITECTURE.md §1.
+    """
+    RETAIL = 'retail'
+    RESTAURANT = 'restaurant'
+    SERVICE = 'service'
+    MODULE_CHOICES = [(RETAIL, 'Supermarket / retail'), (RESTAURANT, 'Restaurant'), (SERVICE, 'Service / repairs')]
+
+    shop = models.ForeignKey(Shop, on_delete=models.CASCADE, related_name='modules')
+    module = models.CharField(max_length=20, choices=MODULE_CHOICES)
+    enabled = models.BooleanField(default=True)
+    changed_at = models.DateTimeField(auto_now=True)
+    changed_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name='+')
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=['shop', 'module'], name='unique_branch_module')]
+
+    def __str__(self):
+        return f'{self.shop} — {self.module}{"" if self.enabled else " (off)"}'

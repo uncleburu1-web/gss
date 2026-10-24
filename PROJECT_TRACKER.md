@@ -92,6 +92,7 @@ A task is `COMPLETED` only with evidence recorded.
 | REST-12 | Web set-up screens for the restaurant (menu, modifiers, tables, stations, taxes, service charge, hub) | gssfrontend, gssandriod | gssfrontend `restaurant` (PR #6 merged 22 Oct) | TESTING | REST-04 | Owner sets a restaurant up without the API | Web E2E | Web done: per-branch modules in Settings; Restaurant page (menu, choices, tables, kitchen stations, service charge, taxes with the activation safeguards, hub till, restaurant reports) following the branch being viewed. `e2e/restaurant.e2e.cjs`, real Chromium against a real server: 23/23, twice (the CEO sets up a second branch through the forms, the database holds exactly that; the first branch's report shows the hub's ₦11,162.50 order). Found and fixed: a double settings load reset the service charge to 0; lists now follow pages; devices list ignored the branch switcher (gss #16) | Phone app (gssandriod) has no restaurant set-up yet | Final check in REST-09 |
 | REST-13 | Restaurant as a shop type (decision 13): "Restaurant & food" next to Gadgets, Clothing, Pharmacy, General at signup and when adding a branch; the branch's type sets its modules and categories; Settings shows the type instead of loose module switches | gss, gssfrontend, gssandriod, gssdesktop | gss, gssfrontend, gssandriod, gssdesktop `restaurant` (gss #17, gssfrontend #6, gssandriod #6, gssdesktop #9: all merged 22 Oct) | TESTING | REST-12 | A new restaurant owner signs up as a restaurant and lands on the restaurant set-up; a business can add a restaurant branch beside a shop; existing businesses unchanged | Signup and add-branch tests on web and phone; migration on a production copy | `Shop.shop_type` per branch (ADR-025); kind decides modules (gadgets retail+service, restaurant retail+restaurant, rest retail); CEO changes a branch's kind (audited, package-checked, nothing deleted); `/me` follows the branch. gss 322/322 (15 new). Real server, two fresh DBs, twice: hub 23/23, web restaurant 29/29, restaurant sign-up 9/9, phone 10/10, supermarket till 15/15. Migration checked on a database with every kind: modules identical before/after, reversible | Not tried on a copy of production data (no access from here); phone has no restaurant screens (points to the web) | Final check in REST-09 |
 | REST-14 | Restaurant-first app for restaurant branches (owner, 23 Oct): own sidebar (Menu, Tables, Kitchen, Stock, Reports, Taxes & charges, Hub till; no shop selling, repairs or promotions, no separate Restaurant page), restaurant takings inside Reports, restaurant dashboard, restaurant roles in Workers | gss, gssfrontend, gssandriod | gss `restaurant-roles` (PR #19), gssfrontend `restaurant-nav` (PR #8), gssandriod `restaurant-nav` (PR #7), all → `restaurant` | REVIEW_REQUIRED | REST-13 | An owner of a restaurant branch never sees shop screens; staff roles are a restaurant's | Browser E2E on web and phone | gss 326/326 (roles per kind in /me; waiters/cashiers/kitchen refused outside a restaurant). Real server, three fresh databases: hub 23/23, web 34/34, sign-up 9/9, phone 15/15 | The hub till app still shows Restaurant as one screen among the shop's (not changed here); phone has no menu/table set-up (points to the web) | Owner reviews gss #19, gssfrontend #8, gssandriod #7; then the test copy rebuilds by itself |
+| REST-15 | Restaurant live on pos.gssolu.com before the shop hardware check (owner, 23 Oct night) | gss, gssfrontend, gssandriod | gss `release-restaurant` → `main`; gssfrontend and gssandriod `restaurant` → `main` | REVIEW_REQUIRED | REST-14 | Existing shops unchanged; restaurants can sign up and set up on the live site; today's tills keep working | Backend suite; upgrade of a database made and used by today's code; today's till (1.0.23) against the release server; web shop tests side by side with today's code | gss 333/333. Upgrade: every business table kept its row count, each branch got its business's kind, gadget branches retail+service, others retail. Today's till: 15/15 and outage test on the release server, 6/6 on the upgraded data. Web shop tests: same results as today's code (one stale check fails on both). Rollback-safe: core 0013 gives the new column a database default | Till restaurant hub (REST-11, REST-14 till) is not released: needs a till build after the hardware check (REST-09) | Owner takes a pg_dump backup, then merges gss, web, phone in that order |
 | QA-01 | Run web E2E in CI | gssfrontend | — | NOT_STARTED | — | Every PR runs the browser E2E against a throwaway Postgres | CI | — | — | — |
 | QA-02 | Tests for Paystack payments and repairs | gss | — | NOT_STARTED | — | Paystack success/failure/duplicate webhook and repair flows covered | Django tests | `repairs/tests.py` has 0 tests | — | — |
 | QA-03 | CI check that shared JS files are identical in every repo | all | — | NOT_STARTED | — | A PR that changes `promotions.js` (later `tax.js`) in one repo only fails | CI | Decision 2 | — | — |
@@ -235,6 +236,13 @@ Third round, 22 Oct 2026 (evening):
 | # | Question | Decision | Recorded in |
 | --- | --- | --- | --- |
 | 13 | How a restaurant is chosen | **Restaurant is a shop type of its own**, picked the same way as Gadgets, Clothing, Pharmacy and General retail, not only a feature switched on in Settings. Read with decision 4 (mixed branches): the type is picked at signup for the first branch and when adding a branch | REST-13 |
+
+Fourth round, 23 Oct 2026 (night):
+
+| # | Question | Decision | Recorded in |
+| --- | --- | --- | --- |
+| 14 | Restaurant on the live site before the hardware check? | Yes: server, web and phone now; the till build still waits for the hardware check (REST-09) | REST-15 |
+| 15 | Who can use the restaurant after the free month, before its price is set? | Every plan includes it (same price); a business put on an explicit package in the admin is held to it | `subscriptions.models.DEFAULT_PACKAGE`, REST-15 |
 
 Still open (billing only): the add-on price of the restaurant package(s).
 
@@ -460,3 +468,20 @@ workflow passes (REST-09).
   REST-14 (see the table): its own sidebar, takings in Reports, its own dashboard, restaurant roles.
 - **Tests run (actual):** gss 326/326; hub 23/23, web 34/34, sign-up 9/9, phone 15/15 on three fresh
   databases.
+
+### 23 Oct 2026 (night) — restaurant release prepared (REST-15)
+
+- **Owner's decisions 14 and 15:** release the restaurant to the live site now (server, web, phone;
+  the till waits for REST-09); every plan includes the restaurant until its price is set.
+- **Release branch:** gss `release-restaurant` = `restaurant` + `main` (no conflicts; the report and
+  devices fixes and the restaurant report changes are all kept). Web and phone `restaurant` already
+  contained `main`.
+- **Checks run (actual):** gss 333/333; a database built and used by today's live code (sales,
+  shifts, damage, counts, promotions, returns, moves; shops of every kind) upgraded with the release:
+  every business table kept its row count, kinds and modules as expected; today's till 1.0.23 on the
+  release server 15/15 + outage test, and 6/6 on the upgraded data; web shop tests identical to
+  today's code. Found and fixed: rolling back would have broken new branches (no database default on
+  the new column) → `core 0013`.
+- **Small existing issue seen:** audit and ledger lines read "2.000 x" since sell-by-weight (stage 11);
+  cosmetic, on production already, not changed here.
+

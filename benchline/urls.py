@@ -41,5 +41,6 @@ urlpatterns = [
     path('api/', include('sync.urls')),
     path('api/', include('customers.urls')),
     path('api/', include('branches.urls')),
+    path('api/', include('restaurant.urls')),
     path('api/realtime/', include('realtime.urls')),
 ]

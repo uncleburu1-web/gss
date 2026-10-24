@@ -26,6 +26,7 @@ from rest_framework.views import APIView
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 
+from core.modules import branch_modules
 from core.permissions import is_owner
 from core.capabilities import has_capability
 from core.utils import get_shop_for_user, user_may_use_branch_device
@@ -36,6 +37,9 @@ from inventory import ledger
 from inventory.models import InventoryItem, StockBatch, StockMovement
 from realtime.events import broadcast
 from sales.models import Sale, SaleItem, next_invoice_number
+from restaurant import ingest as restaurant_ingest
+from restaurant import sync as restaurant_sync
+from restaurant.models import Order
 from promotions.engine import as_dict as _promotion_as_dict
 from promotions.models import Promotion
 from shifts.models import CashMovement, Shift
@@ -446,13 +450,18 @@ def _apply_audit_event(shop, entity_id, operation, payload, ctx=None):
     if AuditLog.objects.filter(shop=shop, target_type='till_event', target_id=str(entity_id)).exists():
         return
     action = payload.get('action')
-    if action not in TILL_AUDIT_ACTIONS:
+    if action in restaurant_ingest.AUDIT_ACTIONS:
+        restaurant_ingest.require_hub(shop, ctx)  # restaurant entries only from the branch's hub (protocol 6)
+        known = restaurant_ingest.AUDIT_ACTIONS
+    elif action in TILL_AUDIT_ACTIONS:
+        known = TILL_AUDIT_ACTIONS
+    else:
         raise ValueError('Unknown audit action.')
     data = payload.get('data') if isinstance(payload.get('data'), dict) else {}
     entry = audit.record(action, shop=shop, user=ctx.get('user'), source='till', device=ctx.get('device'),
                          target_type='till_event', target_id=str(entity_id),
                          actor_name=(payload.get('actor') or None),
-                         summary=str(payload.get('summary') or TILL_AUDIT_ACTIONS[action])[:255],
+                         summary=str(payload.get('summary') or known[action])[:255],
                          reason=str(payload.get('reason') or '')[:255], data=data)
     at = _parse_dt(payload.get('created_at'))
     if at is not None and at <= timezone.now():
@@ -654,7 +663,9 @@ def _apply_stock_movement(shop, entity_id, operation, payload, ctx=None):
 #   2: sale_doc, sale_payment          3: shift, cash_movement
 #   4: stock_movement (damage, stock count) both ways
 #   5: audit_event, mobile money payments, sale_return
-SYNC_PROTOCOL = 5
+#   6: restaurant: order_doc (a finished order, one piece), menu_availability, restaurant audit
+#      actions -- all only from the branch's hub (restaurant/ingest.py)
+SYNC_PROTOCOL = 6
 
 _HANDLERS = {
     'product': _apply_product,
@@ -669,6 +680,8 @@ _HANDLERS = {
     'stock_movement': _apply_stock_movement,
     'audit_event': _apply_audit_event,
     'sale_return': _apply_sale_return,
+    'order_doc': restaurant_ingest.apply_order_doc,
+    'menu_availability': restaurant_ingest.apply_menu_availability,
 }
 
 # Same events a REST create/update/delete on the equivalent resource would
@@ -910,7 +923,17 @@ class SyncPushView(APIView):
                 results.append({'id': op_id, 'status': 'rejected', 'error': str(exc)})
                 continue
 
-            if entity_type in ('sale_payment', 'sale_return'):
+            if entity_type == 'order_doc':
+                # The web app refreshes sales on sale.created; restaurant screens listen for the order.
+                closed = Order.objects.filter(id=entity_id).only('sale_id').first()
+                if closed is not None and closed.sale_id:
+                    events.setdefault('sale.created', [])
+                    if str(closed.sale_id) not in events['sale.created']:
+                        events['sale.created'].append(str(closed.sale_id))
+                event, changed_id = 'restaurant.order_closed', str(entity_id)
+            elif entity_type == 'menu_availability':
+                event, changed_id = 'restaurant.availability', str(payload.get('menu_item_id'))
+            elif entity_type in ('sale_payment', 'sale_return'):
                 event, changed_id = 'sale.updated', str(payload.get('sale_id'))
             else:
                 event = f'{_EVENT_ENTITY.get(entity_type, entity_type)}.{_EVENT_VERB.get(operation, operation)}'
@@ -1077,7 +1100,9 @@ class SyncPullView(APIView):
         since_param = request.query_params.get('since')
         since = parse_datetime(since_param) if since_param else None
         requested = request.query_params.get('entity_types')
-        entity_types = [t for t in (requested.split(',') if requested else list(self.serializers)) if t in self.serializers]
+        # Restaurant configuration is opt-in: only when named AND the branch is a restaurant branch.
+        available = {**self.serializers, **restaurant_sync.allowed_for(shop)} if requested else self.serializers
+        entity_types = [t for t in (requested.split(',') if requested else list(self.serializers)) if t in available]
 
         # Paging (G11). Without `limit` (older tills) everything changed since `since` comes back
         # in one response, exactly as before. With `limit`, rows come back in a stable order
@@ -1095,7 +1120,7 @@ class SyncPullView(APIView):
         for index, entity_type in enumerate(entity_types):
             if index < start_type:
                 continue
-            model, serialize = self.serializers[entity_type]
+            model, serialize = available[entity_type]
             qs = model.objects.filter(shop=shop)
             if model is Sale:
                 qs = qs.prefetch_related('payments').select_related('worker__user')
@@ -1142,6 +1167,10 @@ class SyncPullView(APIView):
             # server_time stays exactly as before for older tills and displays.
             'next_since': (read_started - PULL_CURSOR_OVERLAP).isoformat(),
             'sync_protocol': SYNC_PROTOCOL,
+            # Which modules the branch uses now (retail / restaurant / service). Tills save these at
+            # sign-in; an owner can switch one on or off later (announced live as
+            # branch.modules_changed), so the next pull keeps the till current. Older tills ignore it.
+            'modules': sorted(branch_modules(shop)),
         })
 
 

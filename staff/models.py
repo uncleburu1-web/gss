@@ -18,6 +18,9 @@ class Worker(SyncModel):
         ('reception', 'Receptionist'),
         ('technician', 'Service technician'),
         ('attendant', 'Shop attendant'),
+        ('cashier', 'Cashier (restaurant)'),
+        ('waiter', 'Waiter (restaurant)'),
+        ('kitchen', 'Kitchen staff (restaurant)'),
         ('other', 'Other'),
     ]
 

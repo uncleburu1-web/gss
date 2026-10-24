@@ -7,7 +7,7 @@ from core.permissions import HasCapability
 from core.utils import get_shops_for_user
 from rest_framework.response import Response
 
-from sales.models import Sale, SaleItem
+from sales.models import RESTAURANT_CHARGE, RESTAURANT_TAX, Sale, SaleItem
 from inventory.models import InventoryItem, StockBatch
 from liabilities.models import Liability
 from repairs.models import RepairPayment
@@ -108,6 +108,7 @@ class SalesByItemView(APIView):
         shops = _shops_for(request)
         start, end, label, _ = parse_period(request)
         qs = SaleItem.objects.filter(sale__shop__in=shops, sale__date__gte=start, sale__date__lt=end, is_deleted=False, sale__is_deleted=False)
+        qs = qs.exclude(category__in=[RESTAURANT_CHARGE, RESTAURANT_TAX])  # a restaurant bill's charges are not items sold
 
         grouped = defaultdict(lambda: {'total_sold': 0, 'gross_sale_amt': 0.0, 'cost_total': 0.0, 'gross_profit': 0.0, 'discount': 0.0, 'category': ''})
         for s in qs:
@@ -145,6 +146,7 @@ class BestSellingView(APIView):
         shops = _shops_for(request)
         start, end, label, _ = parse_period(request)
         qs = SaleItem.objects.filter(sale__shop__in=shops, sale__date__gte=start, sale__date__lt=end, is_deleted=False, sale__is_deleted=False)
+        qs = qs.exclude(category__in=[RESTAURANT_CHARGE, RESTAURANT_TAX])  # a restaurant bill's charges are not items sold
 
         grouped = defaultdict(lambda: {'total_sold': 0, 'gross_sale_amt': 0.0})
         for s in qs:
@@ -166,6 +168,7 @@ class SalesByCategoryView(APIView):
         shops = _shops_for(request)
         start, end, label, _ = parse_period(request)
         qs = SaleItem.objects.filter(sale__shop__in=shops, sale__date__gte=start, sale__date__lt=end, is_deleted=False, sale__is_deleted=False)
+        qs = qs.exclude(category=RESTAURANT_TAX)  # tax collected is not a category of sales
 
         grouped = defaultdict(lambda: {'total_sold': 0, 'gross_sale_amt': 0.0, 'gross_profit': 0.0})
         for s in qs:
@@ -250,6 +253,8 @@ class TaxReportView(APIView):
         # tax_rate lives on SaleItem (per line), not the Sale header — a
         # single cart can mix taxed and untaxed items.
         qs = SaleItem.objects.filter(sale__shop__in=shops, sale__date__gte=start, sale__date__lt=end, is_deleted=False, sale__is_deleted=False)
+        # Restaurant sales carry their taxes as frozen bill lines, not per item: taken from there below.
+        qs = qs.filter(sale__restaurant_order__isnull=True)
 
         grouped = defaultdict(lambda: {'taxable_sales': 0.0, 'tax_collected': 0.0, 'count': 0})
         total_tax = 0.0
@@ -261,9 +266,25 @@ class TaxReportView(APIView):
             g['count'] += 1
             total_tax += float(s.tax_amount)
 
+        # Restaurant: each tax exactly as charged on the bill (rate, base, amount frozen when printed),
+        # whether added to the bill or already inside the prices.
+        from restaurant.models import BillCharge
+        restaurant = defaultdict(lambda: {'taxable_sales': 0.0, 'tax_collected': 0.0, 'count': 0})
+        charges = BillCharge.objects.filter(kind='tax', bill__order__shop__in=shops, bill__order__status='closed',
+                                            bill__order__sale__date__gte=start, bill__order__sale__date__lt=end,
+                                            bill__order__sale__is_deleted=False)
+        for c in charges:
+            for g in (grouped[float(c.rate)], restaurant[(c.name, float(c.rate), c.inclusive)]):
+                g['taxable_sales'] += float(c.base)
+                g['tax_collected'] += float(c.amount)
+                g['count'] += 1
+            total_tax += float(c.amount)
+
         rows = [{'tax_rate': rate, **g} for rate, g in grouped.items()]
         rows.sort(key=lambda r: r['tax_rate'])
-        return Response({'period': label, 'total_tax_collected': total_tax, 'rows': rows})
+        restaurant_rows = sorted(({'name': name, 'tax_rate': rate, 'inclusive': inclusive, **g} for (name, rate, inclusive), g in restaurant.items()),
+                                 key=lambda r: (r['tax_rate'], r['name']))
+        return Response({'period': label, 'total_tax_collected': total_tax, 'rows': rows, 'restaurant': restaurant_rows})
 
 
 class ExpiringInventoryView(APIView):

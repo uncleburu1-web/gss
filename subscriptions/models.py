@@ -23,6 +23,42 @@ TRIAL_DAYS = 30  # free trial on signup — one month, not one year
 ENTERPRISE_BREAKEVEN_BRANCHES = 4
 
 
+# Every feature code a package can contain (docs/architecture/TARGET_ARCHITECTURE.md §1).
+FEATURES = {
+    'retail': 'Supermarket / retail POS',
+    'service': 'Service / repairs desk',
+    'restaurant.tables': 'Restaurant: floor plan and dine-in orders',
+    'restaurant.kitchen': 'Restaurant: kitchen stations, tickets, kitchen printing and screens',
+    'restaurant.waiters': 'Restaurant: waiter phones',
+    'restaurant.recipes': 'Restaurant: recipe costing and ingredient stock',
+}
+
+
+class Package(models.Model):
+    """What a business may switch on (owner's decision 3, 21 Oct 2026): every branch costs the same,
+    restaurant or supermarket; the PACKAGE decides which features exist for the business. Data, not
+    code, so packages can be added or changed in the admin. No price here yet: the add-on price of the
+    restaurant package is still open, and Subscription.total_price_ngn is deliberately unchanged."""
+    code = models.SlugField(max_length=40, unique=True)
+    name = models.CharField(max_length=80)
+    features = models.JSONField(default=list, help_text='Feature codes, see subscriptions.models.FEATURES')
+    is_active = models.BooleanField(default=True)
+    sort = models.PositiveSmallIntegerField(default=0)
+
+    class Meta:
+        ordering = ['sort', 'name']
+
+    def __str__(self):
+        return self.name
+
+
+# The package of a subscription that has none (every subscription so far). Owner's decision
+# (23 Oct 2026): until the restaurant add-on price is set, every plan includes the restaurant, so a
+# paying business can run restaurant branches at the same price. A business can still be put on an
+# explicit package (e.g. 'retail') in the admin; that one then decides.
+DEFAULT_PACKAGE = 'retail_restaurant'
+
+
 class Subscription(models.Model):
     """ONE per ORGANIZATION — not per branch, not per staff account (see
     the architecture note: "do not create a separate subscription for
@@ -61,6 +97,8 @@ class Subscription(models.Model):
                              '0 = they stop the moment the period ends (the business rule since 2026-10).',
     )
     auto_renew = models.BooleanField(default=True)
+    package = models.ForeignKey(Package, on_delete=models.PROTECT, null=True, blank=True, related_name='subscriptions',
+                                help_text='Empty = the Retail package (what every business had before packages existed).')
     last_payment_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -82,6 +120,15 @@ class Subscription(models.Model):
             return PRICING_NGN['enterprise']
         tier = PRICING_NGN[self.billing_cycle]
         return tier['base'] + self.additional_branches * tier['additional_branch']
+
+    @property
+    def features(self):
+        """The feature codes this business may use. The free trial includes every feature, so a new
+        restaurant can try the whole system; afterwards it is the package's list."""
+        if self.status == 'trial' and self.effective_status == 'trial':
+            return set(FEATURES)
+        package = self.package or Package.objects.filter(code=DEFAULT_PACKAGE).first()
+        return set(package.features) if package else {'retail', 'service'}
 
     @property
     def enterprise_recommended(self):

@@ -52,7 +52,7 @@ erDiagram
 
 | Model | Purpose | Key fields | Constraints / indexes |
 | --- | --- | --- | --- |
-| `RestaurantSettings` | Branch-level options | `shop` (one-to-one), `hub_device` (the one `Device` allowed to be this branch's hub), `service_charge_rate`, `service_charge_types` (e.g. `["dine_in"]`), `service_charge_taxable`, `require_served_before_payment` (R10), `order_number_prefix`, `business_day_starts_at` (default 05:00, so an order opened at 23:50 and paid at 00:20 belongs to one business day) | One per branch. Only one hub per branch, so two tills can never both run the same restaurant |
+| `RestaurantSettings` | Branch-level options | `shop` (one-to-one), `hub_device` (the one `Device` allowed to be this branch's hub), `service_charge_rate`, `service_charge_types` (e.g. `["dine_in"]`), `require_served_before_payment` (R10), `order_number_prefix`, `business_day_starts_at` (default 05:00, so an order opened at 23:50 and paid at 00:20 belongs to one business day) | One per branch. Only one hub per branch, so two tills can never both run the same restaurant |
 | `DiningArea` | "Hall", "Terrace" | `name`, `sort` | Unique (`shop`, `name`) |
 | `RestaurantTable` | A table | `area`, `label` ("T12"), `seats`, `is_active` | Unique (`shop`, `label`). Occupancy is **not** stored here: it is derived from open orders (section 3), so it can never disagree with them |
 | `KitchenStation` | Where food is made | `name`, `prints` (bool), `shows_on_screen` (bool), `is_active`, `sort` | Unique (`shop`, `name`). At least one of `prints` / `shows_on_screen`. **Which Windows printer** a station prints to is set **on the hub**, not here: printer names belong to one PC (see section 4) |

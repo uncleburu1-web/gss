@@ -38,6 +38,9 @@ class InventoryItem(SyncModel):
         ('household', 'Household item'),
         ('stationery', 'Stationery'),
         ('beverage', 'Beverage'),
+        ('ingredient', 'Food ingredient'),
+        ('packaging', 'Packaging / takeaway pack'),
+        ('kitchen_supply', 'Kitchen & cleaning supply'),
         ('other', 'Other'),
     ]
 
@@ -50,6 +53,9 @@ class InventoryItem(SyncModel):
         'pharmacy': ['medicine', 'tablet_capsule', 'syrup_liquid', 'injection', 'medical_supply', 'equipment'],
         'clothing': ['apparel_top', 'apparel_bottom', 'footwear', 'outerwear', 'clothing_accessory'],
         'general': ['grocery', 'household', 'stationery', 'beverage'],
+        # A restaurant's STOCK (its menu lives in the restaurant app): drinks it sells as they come,
+        # what the kitchen cooks with, takeaway packs, and kitchen supplies.
+        'restaurant': ['beverage', 'ingredient', 'packaging', 'kitchen_supply'],
     }
 
     @classmethod
