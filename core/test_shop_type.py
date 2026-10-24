@@ -223,3 +223,23 @@ class RolesTests(TestCase):
         client_for(self.ceo).patch(f'/api/branches/{self.kitchen.id}/', {'shop_type': 'general'}, format='json')
         r = client_for(self.ceo, self.kitchen).patch(f"/api/workers/{waiter['id']}/", {'phone': '0800'}, format='json')
         self.assertEqual(r.status_code, 200, r.content)
+
+
+class PlanTests(TestCase):
+    """Owner's decision (23 Oct 2026): until the restaurant add-on price is set, every plan includes it."""
+
+    def test_a_paying_business_without_a_package_can_run_a_restaurant(self):
+        from django.utils import timezone
+        from datetime import timedelta
+        from subscriptions.models import Subscription, get_or_create_subscription
+        org, shop, ceo = make_business('Iya Basira', business_type='general')
+        sub = get_or_create_subscription(org)
+        Subscription.objects.filter(pk=sub.pk).update(status='active', package=None, current_period_end=timezone.now() + timedelta(days=30))
+        r = client_for(ceo).patch(f'/api/branches/{shop.id}/', {'shop_type': 'restaurant'}, format='json')
+        self.assertEqual(r.status_code, 200, r.content)
+        self.assertEqual(client_for(ceo).post('/api/restaurant/menu/categories/', {'name': 'Soups'}, format='json').status_code, 201)
+        # A business put on an explicit Retail package in the admin is still held to it.
+        paid(org, 'retail')
+        r = client_for(ceo).post('/api/branches/', {'name': 'Second', 'shop_type': 'restaurant'}, format='json')
+        self.assertEqual((r.status_code, r.json()['code']), (403, 'not_in_package'))
+

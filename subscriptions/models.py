@@ -52,7 +52,11 @@ class Package(models.Model):
         return self.name
 
 
-DEFAULT_PACKAGE = 'retail'
+# The package of a subscription that has none (every subscription so far). Owner's decision
+# (23 Oct 2026): until the restaurant add-on price is set, every plan includes the restaurant, so a
+# paying business can run restaurant branches at the same price. A business can still be put on an
+# explicit package (e.g. 'retail') in the admin; that one then decides.
+DEFAULT_PACKAGE = 'retail_restaurant'
 
 
 class Subscription(models.Model):
