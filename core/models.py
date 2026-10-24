@@ -146,7 +146,9 @@ class Shop(models.Model):
     )
     status = models.CharField(max_length=10, choices=STATUS_CHOICES, default='active')
     shop_type = models.CharField(
-        max_length=20, choices=SHOP_TYPE_CHOICES, blank=True, default='',
+        # db_default as well: code from before this column existed (a rolled-back deploy) can still
+        # create branches; save() below then fills the type in on the next save.
+        max_length=20, choices=SHOP_TYPE_CHOICES, blank=True, default='', db_default='',
         help_text='What kind of shop this branch is (gadgets, pharmacy, restaurant, ...). Left empty, it '
                   'takes the business\'s sign-up type when saved. Changing it changes the branch\'s modules '
                   '(branches.views.BranchViewSet.perform_update).',
